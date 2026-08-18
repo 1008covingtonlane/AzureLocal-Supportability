@@ -48,7 +48,8 @@
   <tr>
     <th style="text-align:left;">Who owns this</th>
     <td>The customer's <strong>cluster administrator</strong>. This is not a
-    networking or OEM issue. If the only references are under
+    networking issue, and <strong>no OEM, BIOS, or firmware action is ever
+    required</strong>. If the only references are under
     <code>Infrastructure_1</code> (ARB or platform-managed content), stop and
     engage Microsoft Support rather than self-remediating.</td>
   </tr>
