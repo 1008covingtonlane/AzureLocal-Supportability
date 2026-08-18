@@ -144,8 +144,8 @@ Technical grade records the TSG outcome:
 | C | Incomplete validation, fallback-only validation, missing required routing metadata, or unclear automation readiness |
 | F | A structural, safety, metadata, or command defect that must block publishing |
 
-Validation depth (static-only through scratch-object reproduction) is recorded separately in
-`fidelity_level` (L0 to L3), not in the grade.
+Validation depth (static-only through a full live inject-detect-mitigate loop) is recorded
+separately in `fidelity_level` (L0 to L4), not in the grade.
 
 Use `not-assessed`, `scaffold`, `ready`, `proven`, `blocked`, or `manual` for automation status.
 Record `on-device`, `mixed`, `cloud-diagnostic`, `cloud-control`, or `thin` separately as the
