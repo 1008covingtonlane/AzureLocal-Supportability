@@ -242,16 +242,20 @@ not fail the operation. As a recovery action it renames the failed directory out
 the way to the next free numbered name (`ClusterStorage.000`, then `.001`, and so
 on) and creates a fresh `C:\ClusterStorage`.
 
-The Microsoft Windows Support Team documents this recovery behavior and attributes
-the underlying failure to security software and filter-driver products blocking
-access to the CSV path:
+This failure mode is what Microsoft's own guidance addresses. Microsoft documents that
+security, backup, and filter-driver products holding a handle on the CSV path cause access
+failures under `C:\ClusterStorage`, and publishes the exclusions that prevent them (see
+[Recommended antivirus exclusions for Hyper-V hosts](https://learn.microsoft.com/troubleshoot/windows-server/virtualization/antivirus-exclusions-for-hyper-v-hosts)
+and [Events 5120 and 5142 and unable to access the ClusterStorage folder](https://learn.microsoft.com/troubleshoot/windows-server/backup-and-storage/event-5120-5142-access-clusterstorage-folder)).
+Excluding `C:\ClusterStorage` from antivirus scanning on every node is the practical
+prevention for this condition. See [Prevention](#prevention).
 
-> Source: [Break chain on multi mount points](https://jpwinsup.github.io/blog/2025/01/13/Hyper-V/Break-chain-on-multi-mount-points/),
+A Microsoft Windows Support Team blog post describes the specific recovery behavior (the
+rename to the next numbered name) in more detail. It is a helpful secondary write-up, not a
+normative source:
+
+> Additional reading (non-normative): [Break chain on multi mount points](https://jpwinsup.github.io/blog/2025/01/13/Hyper-V/Break-chain-on-multi-mount-points/),
 > Microsoft Windows Support Team blog, 13 January 2025.
-
-That is consistent with Microsoft's own guidance to exclude `C:\ClusterStorage` from
-antivirus scanning on Hyper-V hosts, which is the practical prevention for this
-condition. See [Prevention](#prevention).
 
 The result is:
 
@@ -588,61 +592,113 @@ Combine the results and place the cluster in exactly one category.
        $pattern  = '[\\/]ClusterStorage\.\d+([\\/]|$)'
        $blockers = New-Object System.Collections.Generic.List[string]
 
+       # This gate is FAIL-CLOSED. Any discovery, query, or remoting error is recorded as a
+       # blocker, so an incomplete audit can never report SafeToDelete = True. Deletion is
+       # allowed only when every expected check ran to completion AND found nothing.
+
        # (1) An active CSV mounted under a numbered root means this is not a ghost.
-       foreach ($csv in (Get-ClusterSharedVolume -ErrorAction SilentlyContinue)) {
-           if ($csv.SharedVolumeInfo.FriendlyVolumeName -match $pattern) {
-               $blockers.Add("ActiveCsvUnderNumberedRoot: $($csv.Name) -> $($csv.SharedVolumeInfo.FriendlyVolumeName)")
+       try {
+           foreach ($csv in (Get-ClusterSharedVolume -ErrorAction Stop)) {
+               if ($csv.SharedVolumeInfo.FriendlyVolumeName -match $pattern) {
+                   $blockers.Add("ActiveCsvUnderNumberedRoot: $($csv.Name) -> $($csv.SharedVolumeInfo.FriendlyVolumeName)")
+               }
            }
+       } catch {
+           $blockers.Add("QueryError: Get-ClusterSharedVolume failed -> $($_.Exception.Message)")
        }
 
        # (2) Cluster-wide resource parameters: catches VMs owned by other nodes.
-       foreach ($r in (Get-ClusterResource -ErrorAction SilentlyContinue)) {
-           try {
-               foreach ($p in (Get-ClusterParameter -InputObject $r -ErrorAction Stop)) {
-                   if (($p.Value -is [string]) -and ($p.Value -match $pattern)) {
-                       $blockers.Add("ClusterResource: $($r.Name).$($p.Name) -> $($p.Value)")
+       try {
+           foreach ($r in (Get-ClusterResource -ErrorAction Stop)) {
+               try {
+                   foreach ($p in (Get-ClusterParameter -InputObject $r -ErrorAction Stop)) {
+                       if (($p.Value -is [string]) -and ($p.Value -match $pattern)) {
+                           $blockers.Add("ClusterResource: $($r.Name).$($p.Name) -> $($p.Value)")
+                       }
                    }
+               } catch {
+                   $blockers.Add("QueryError: Get-ClusterParameter on '$($r.Name)' failed -> $($_.Exception.Message)")
                }
-           } catch { }
+           }
+       } catch {
+           $blockers.Add("QueryError: Get-ClusterResource failed -> $($_.Exception.Message)")
        }
 
-       # (3) Per-node checks across every running node.
-       $nodes = (Get-ClusterNode -ErrorAction SilentlyContinue | Where-Object State -eq 'Up').Name
-       if (-not $nodes) { $nodes = $env:COMPUTERNAME }
-
-       $perNode = Invoke-Command -ComputerName $nodes -ArgumentList $pattern -ScriptBlock {
-           param($Pattern)
-           $hits = New-Object System.Collections.Generic.List[string]
-
-           foreach ($vm in (Get-VM -ErrorAction SilentlyContinue)) {
-               foreach ($d in ($vm | Get-VMHardDiskDrive -ErrorAction SilentlyContinue)) {
-                   if ($d.Path -match $Pattern) { $hits.Add("VMHardDisk: $($vm.Name) -> $($d.Path)") }
-               }
-               foreach ($prop in 'ConfigurationLocation','SnapshotFileLocation','SmartPagingFilePath') {
-                   $v = $vm.$prop
-                   if ($v -and ($v -match $Pattern)) { $hits.Add("VMConfig: $($vm.Name).$prop -> $v") }
-               }
-           }
-
-           foreach ($f in (Get-SmbOpenFile -ErrorAction SilentlyContinue)) {
-               if ($f.Path -match $Pattern) { $hits.Add("SmbOpenFile: $($f.Path)") }
-           }
-
-           # A reparse point inside a ghost root means it still redirects to a volume.
-           foreach ($g in (Get-ChildItem -Path 'C:\' -Directory -Filter 'ClusterStorage.*' -ErrorAction SilentlyContinue |
-                           Where-Object { $_.Name -match '^ClusterStorage\.\d+$' })) {
-               foreach ($c in (Get-ChildItem -LiteralPath $g.FullName -Force -ErrorAction SilentlyContinue)) {
-                   if ($c.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-                       $hits.Add("ReparsePoint: $($c.FullName)")
-                   }
-               }
-           }
-
-           [pscustomobject]@{ Node = $env:COMPUTERNAME; Hits = @($hits) }
+       # (3) Per-node checks across every running node. Cluster-node discovery MUST succeed:
+       # without the node list we cannot prove cluster-wide clearance, so a failure here is a
+       # blocker, NOT a silent fall back to the local machine.
+       $nodes = $null
+       try {
+           $nodes = @(Get-ClusterNode -ErrorAction Stop | Where-Object State -eq 'Up' |
+                      Select-Object -ExpandProperty Name)
+       } catch {
+           $blockers.Add("DiscoveryError: Get-ClusterNode failed; cannot confirm cluster-wide clearance -> $($_.Exception.Message)")
+       }
+       if (($null -ne $nodes) -and ($nodes.Count -eq 0)) {
+           $blockers.Add("DiscoveryError: no cluster node reported 'Up'; cannot confirm cluster-wide clearance")
        }
 
-       foreach ($n in $perNode) {
-           foreach ($h in $n.Hits) { $blockers.Add("[$($n.Node)] $h") }
+       if ($nodes -and $nodes.Count -gt 0) {
+           # -ErrorAction SilentlyContinue keeps one unreachable node from aborting the whole
+           # sweep; the reported-vs-expected check below turns any missing node into a blocker.
+           $perNode = Invoke-Command -ComputerName $nodes -ArgumentList $pattern `
+               -ErrorAction SilentlyContinue -ScriptBlock {
+               param($Pattern)
+               $hits   = New-Object System.Collections.Generic.List[string]
+               $errors = New-Object System.Collections.Generic.List[string]
+
+               try {
+                   foreach ($vm in (Get-VM -ErrorAction Stop)) {
+                       foreach ($d in ($vm | Get-VMHardDiskDrive -ErrorAction SilentlyContinue)) {
+                           if ($d.Path -match $Pattern) { $hits.Add("VMHardDisk: $($vm.Name) -> $($d.Path)") }
+                       }
+                       foreach ($prop in 'ConfigurationLocation','SnapshotFileLocation','SmartPagingFilePath') {
+                           $v = $vm.$prop
+                           if ($v -and ($v -match $Pattern)) { $hits.Add("VMConfig: $($vm.Name).$prop -> $v") }
+                       }
+                   }
+               } catch {
+                   $errors.Add("Get-VM enumeration failed -> $($_.Exception.Message)")
+               }
+
+               try {
+                   foreach ($f in (Get-SmbOpenFile -ErrorAction Stop)) {
+                       if ($f.Path -match $Pattern) { $hits.Add("SmbOpenFile: $($f.Path)") }
+                   }
+               } catch {
+                   $errors.Add("Get-SmbOpenFile failed -> $($_.Exception.Message)")
+               }
+
+               # A reparse point inside a ghost root means it still redirects to a volume.
+               try {
+                   foreach ($g in (Get-ChildItem -Path 'C:\' -Directory -Filter 'ClusterStorage.*' -ErrorAction Stop |
+                                   Where-Object { $_.Name -match '^ClusterStorage\.\d+$' })) {
+                       foreach ($c in (Get-ChildItem -LiteralPath $g.FullName -Force -ErrorAction SilentlyContinue)) {
+                           if ($c.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                               $hits.Add("ReparsePoint: $($c.FullName)")
+                           }
+                       }
+                   }
+               } catch {
+                   $errors.Add("Ghost-root enumeration failed -> $($_.Exception.Message)")
+               }
+
+               [pscustomobject]@{ Node = $env:COMPUTERNAME; Hits = @($hits); Errors = @($errors) }
+           }
+
+           foreach ($n in $perNode) {
+               foreach ($h in $n.Hits)   { $blockers.Add("[$($n.Node)] $h") }
+               foreach ($e in $n.Errors) { $blockers.Add("[$($n.Node)] QueryError: $e") }
+           }
+
+           # Every expected node MUST return a result. A node that never reported (unreachable,
+           # WinRM down, remoting refused) is a blocker: we cannot clear what we could not inspect.
+           $reported = @($perNode | ForEach-Object { $_.PSComputerName })
+           foreach ($expected in $nodes) {
+               if ($reported -notcontains $expected) {
+                   $blockers.Add("[$expected] RemotingError: node did not return an audit result (unreachable or WinRM unavailable)")
+               }
+           }
        }
 
        [pscustomobject]@{
@@ -812,13 +868,21 @@ which moves disks, configuration, checkpoints, and the smart paging file.
    #   "Hash tables in the Vhds parameter must contain 'DestinationFilePath' key"
    # even though the key IS present. The wrapper is invisible to normal checks:
    # .GetType() reports String and -is [string] reports True.
+   # Give each disk its OWN numbered subdirectory. Two disks can share a leaf filename
+   # (attached from different source folders); mapping both to $Destination\<leaf> would
+   # produce identical DestinationFilePath values and make Move-VMStorage fail. A unique
+   # per-disk subdirectory keeps the mapping one-to-one while preserving each filename.
+   $diskIndex = 0
    $vhds = @(
        Get-VM -Name $VMName | Get-VMHardDiskDrive |
            Where-Object { $_.Path -match $GhostPathPattern } |
            ForEach-Object {
+               $diskIndex++
+               $diskDir = Join-Path $Destination ('Disk{0:D2}' -f $diskIndex)
+               New-Item -ItemType Directory -Path $diskDir -Force | Out-Null
                @{
                    SourceFilePath      = [string]$_.Path
-                   DestinationFilePath = [string](Join-Path $Destination (Split-Path $_.Path -Leaf))
+                   DestinationFilePath = [string](Join-Path $diskDir (Split-Path $_.Path -Leaf))
                }
            }
    )
