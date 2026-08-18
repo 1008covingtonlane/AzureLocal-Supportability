@@ -15,7 +15,7 @@
   </tr>
   <tr>
     <th style="text-align:left;">Severity</th>
-    <td><strong>Critical</strong>. A non-active subscription reports a <strong>FAILURE</strong> status that blocks the solution update. See the detection note.</td>
+    <td><strong>Critical</strong>. A non-active subscription reports a <strong>FAILURE</strong> status that blocks the solution update.</td>
   </tr>
 </table>
 
@@ -231,7 +231,7 @@ Confirm `HealthState` is `Success` with a current `HealthCheckDate`.
 
 ## Glossary
 
-- **Azure Stack HCI subscription:** the Azure subscription the Azure Local cluster is registered to, which carries its Azure management plane and billing. The check passes only when this subscription reports `Status = Active`.
+- **Azure Stack HCI subscription:** the Azure subscription the Azure Local cluster is registered to, which carries its Azure management plane and billing. The check passes only when this subscription reports `SubscriptionStatus = Active`.
 - **`Get-AzureStackHCISubscriptionStatus`:** the on-node cmdlet that returns the registered subscriptions and their status. This check runs it and reads the `Azure Stack HCI` subscription's `SubscriptionStatus`.
 - **Arc Integration validator:** the Environment Validator component (`Invoke-AzStackHciArcIntegrationValidation`, surfaced as `Test-AzStackHciArcIntegration`) that validates the cluster's Azure / Arc integration during Deployment, Update, and Upgrade readiness. This subscription-state check (`Test-AzureStackHCISubscriptionState`) is one of its tests.
 - **Active:** the healthy subscription state. Disabled, Warned, Past due, Expired, or Deleted are non-active states that fail this check.
