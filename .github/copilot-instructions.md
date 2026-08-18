@@ -130,10 +130,13 @@ Technical grade records the TSG outcome, not the cluster outcome:
 | Grade | Meaning |
 | --- | --- |
 | `null` | No TSG-FORGE technical grade has been established |
-| A | The detector, discoverability, documented mitigation, and revalidation passed |
-| B | The live loop passed, but documented discoverability is incomplete |
-| C | Recovery required fallback automation or the failure detail was not actionable |
-| F | The bad state was not detected or the documented mitigation did not restore service |
+| A | The article is complete for its type, safety gates are present, metadata is valid, links resolve, and lint is clean |
+| B | Usable, but non-blocking gaps remain, such as missing optional evidence or a documented false-positive warning |
+| C | Incomplete validation, fallback-only validation, missing required routing metadata, or unclear automation readiness |
+| F | A structural, safety, metadata, or command defect that must block publishing |
+
+Validation depth (static-only through scratch-object reproduction) is recorded separately in
+`fidelity_level` (L0 to L3), not in the grade.
 
 Automation status is separate from execution surface:
 

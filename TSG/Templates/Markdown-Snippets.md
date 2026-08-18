@@ -445,7 +445,7 @@ python3 <path-to-tsg-pr-review>/scripts/lint_tsg.py <article-file>
 
 | Check | Command | Result | Report path or output |
 | --- | --- | --- | --- |
-| TSG-FORGE lint | `python3 <path-to-tsg-forge>/harness.py --lint --tsg <article-file>` | <A, B, F, or not run> | <report path> |
+| TSG-FORGE lint | `python3 <path-to-tsg-forge>/harness.py --lint --tsg <article-file>` | <A, B, C, F, or not run> | <report path> |
 | Deterministic PR lint | `python3 <path-to-tsg-pr-review>/scripts/lint_tsg.py <article-file>` | <zero findings, or finding count> | <output path or pasted JSON> |
 ```
 

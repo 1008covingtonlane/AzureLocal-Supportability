@@ -130,7 +130,7 @@ Verify these values against current public Microsoft documentation and the produ
 | Product or component | Supported versions | Supported scenarios | Unsupported scenarios | Source of truth |
 | -------------------- | ------------------ | ------------------- | --------------------- | --------------- |
 | {Azure Local product or component} | {Version or build range} | {Where this applies} | {Where this does not apply} | {Public Microsoft Learn URL or product documentation} |
-| {OEM, hardware, driver, firmware, or module when applicable} | {Version or model range} | {Supported use} | {Unsupported use} | {Public Microsoft Learn URL or OEM public documentation when permitted} |
+| {OEM, hardware, driver, firmware, or module when applicable} | {Version or model range} | {Supported use} | {Unsupported use} | {Public Microsoft Learn URL} |
 
 ## Required inputs
 

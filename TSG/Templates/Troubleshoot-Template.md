@@ -178,14 +178,18 @@ Only run a mitigation after the matching diagnosis branch is satisfied and the p
 # Action
 {Mitigation command}
 
-# Rollback, if the stop condition is met
+# Verification
+{Verification command}
+```
+
+Run the rollback block below **only** if a stop condition was met or the verification failed. Do not run it after a successful mitigation, or it will undo the change before final verification.
+
+```powershell
+# Rollback (run ONLY if a stop condition was met or the verification failed)
 {Rollback command}
 
 # Rollback verification
 {Rollback verification command}
-
-# Verification
-{Verification command}
 ```
 
 ## Rollback
