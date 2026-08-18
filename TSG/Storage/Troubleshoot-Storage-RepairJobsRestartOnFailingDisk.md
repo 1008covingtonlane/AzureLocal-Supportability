@@ -183,7 +183,7 @@ Run through this list before Step 4. Most stuck or unsafe retires trace back to 
 Get-StorageJob | Select-Object Name, JobState, PercentComplete, BytesProcessed, BytesTotal
 
 # The affected volume reports No Redundancy / Unhealthy.
-Get-VirtualDisk | Select-Object FriendlyName, HealthStatus, OperationalStatus, OperationalDetails
+Get-VirtualDisk | Select-Object FriendlyName, HealthStatus, OperationalStatus, OtherOperationalStatusDescription
 ```
 
 #### Step 2: Identify the failing physical disk
@@ -243,7 +243,7 @@ Get-PhysicalDisk | Where-Object { $_.Usage -eq 'Auto-Select' -and $_.SerialNumbe
 
 The check: **pool free space must exceed the failing drive's used capacity**, and you should still have reserve left afterward (about one capacity drive per node). Because three-way mirror places copies across three nodes, the free space also has to be distributed so the surviving nodes can each hold their share. If one node's drives are all near 100 percent, the rebuild for slabs that need that node stalls even when the pool total looks fine.
 
-Worked example from a real case: the failing 2.4 TB drive held about 2.0 TB of data, and the pool reported about 10.8 TB free (roughly 86 percent full). That 10.8 TB still included the ~2.4 TB sitting on the drive being retired, so the surviving disks held only about 8.4 TB free. The ~2.0 TB that had to be relocated fit easily into that 8.4 TB, so there was enough evacuation headroom and the rebuild completed and restored redundancy. Note, however, that 8.4 TB is below the ~9.6 TB full-reserve target (one 2.4 TB drive per node across four nodes): the pool ran with less than the recommended repair reserve until the failed drive was physically replaced, so add the replacement promptly to restore full reserve.
+Worked example from a real case: the failing 2.4 TB drive held about 2.0 TB of data, and the pool reported about 10.8 TB free (roughly 86 percent full). About 0.4 TB of that free space sat on the drive being retired (a 2.4 TB drive with ~2.0 TB used), so the surviving disks had roughly 10.4 TB free to absorb the ~2.0 TB being relocated. That fit easily, and after the rebuild the surviving disks held about 8.4 TB free (the ~10.4 TB less the ~2.0 TB rebuilt), so redundancy was restored with headroom to spare. Note, however, that 8.4 TB is below the ~9.6 TB full-reserve target (one 2.4 TB drive per node across four nodes): the pool ran with less than the recommended repair reserve until the failed drive was physically replaced, so add the replacement promptly to restore full reserve.
 
 If the pool has essentially no free reserve (for example above roughly 95 percent with no per-node headroom), retiring the drive can leave S2D with nowhere to rebuild and the volume stays degraded. In that case add capacity or reduce data first, then retire. Remember that on thin volumes, deleting data does not free pool space quickly, so plan the reserve ahead of time rather than deleting at the last minute.
 
