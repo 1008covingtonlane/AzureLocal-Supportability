@@ -254,7 +254,7 @@ If this returns no rows and the new disks show `CannotPoolReason = In a Pool`, t
 
 ### Step 4: Manually Add Disks Only When Needed
 
-Manual add is appropriate when automatic pooling does not claim eligible disks, the target pool is known, and the disks show `CanPool=True`.
+[MEDIUM RISK] Manual add changes storage pool membership. It is appropriate when automatic pooling does not claim eligible disks, the target pool is known, and the disks show `CanPool=True`.
 
 First, inspect the current pool and eligible disks:
 
