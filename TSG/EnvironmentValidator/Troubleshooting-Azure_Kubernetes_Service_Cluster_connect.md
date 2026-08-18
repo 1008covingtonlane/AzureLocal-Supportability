@@ -15,7 +15,7 @@
   </tr>
   <tr>
     <th style="text-align:left;">Severity</th>
-    <td><strong>Warning</strong> in the Azure public cloud (non-blocking, but the Arc cluster-connect feature will not work until it is fixed); <strong>Critical</strong> in Azure Government (Fairfax). See the detection note.</td>
+    <td><strong>Warning</strong> in the Azure public cloud (non-blocking, but the Arc cluster-connect feature will not work until it is fixed); <strong>Critical</strong> in Azure Government (Fairfax).</td>
   </tr>
 </table>
 
