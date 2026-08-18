@@ -467,6 +467,7 @@ roles, platform-managed resources, and anything that is not a Hyper-V VM on the 
 you happen to be sitting on. Run it **once** from any node.
 
 ```powershell
+$paramErrors = New-Object System.Collections.Generic.List[string]
 Get-ClusterResource | ForEach-Object {
     $r = $_
     try {
@@ -477,9 +478,17 @@ Get-ClusterResource | ForEach-Object {
         }
     }
     catch {
-        # Some resource types do not expose parameters; ignore and continue.
+        # Most resource types that throw here simply do not expose parameters, which is
+        # benign. Record the resource so a genuine query failure stays visible instead of
+        # silently reducing coverage.
+        $paramErrors.Add($r.Name)
     }
 } | Sort-Object Resource, Parameter | Format-Table -AutoSize
+
+if ($paramErrors.Count) {
+    Write-Warning ("{0} cluster resource(s) did not return parameters and were not inspected: {1}" -f `
+        $paramErrors.Count, ($paramErrors -join ', '))
+}
 ```
 
 ### 2D. Inventory what is actually inside
@@ -868,6 +877,7 @@ which moves disks, configuration, checkpoints, and the smart paging file.
    #   "Hash tables in the Vhds parameter must contain 'DestinationFilePath' key"
    # even though the key IS present. The wrapper is invisible to normal checks:
    # .GetType() reports String and -is [string] reports True.
+
    # Give each disk its OWN numbered subdirectory. Two disks can share a leaf filename
    # (attached from different source folders); mapping both to $Destination\<leaf> would
    # produce identical DestinationFilePath values and make Move-VMStorage fail. A unique
@@ -980,6 +990,7 @@ Get-ChildItem -Path 'C:\' -Directory -Filter 'ClusterStorage.*' -ErrorAction Sil
     Select-Object FullName, CreationTime, LastWriteTime |
     Export-Csv "$out\ghost-roots.csv" -NoTypeInformation
 
+$paramErrors = New-Object System.Collections.Generic.List[string]
 Get-ClusterResource | ForEach-Object {
     $r = $_
     try {
@@ -988,8 +999,18 @@ Get-ClusterResource | ForEach-Object {
                 [pscustomobject]@{ Resource = $r.Name; Parameter = $_.Name; Value = $_.Value }
             }
         }
-    } catch { }
+    }
+    catch {
+        # Benign for resource types that expose no parameters; record the rest so the
+        # support case shows which resources could not be inspected.
+        $paramErrors.Add($r.Name)
+    }
 } | Export-Csv "$out\cluster-resource-refs.csv" -NoTypeInformation
+
+if ($paramErrors.Count) {
+    $paramErrors | Set-Content "$out\cluster-resource-uninspected.txt"
+    Write-Host ("Note: {0} cluster resource(s) returned no parameters; listed in cluster-resource-uninspected.txt" -f $paramErrors.Count)
+}
 
 Write-Host "Evidence collected in $out"
 ```
@@ -1036,6 +1057,7 @@ Get-ClusterSharedVolume | ForEach-Object {
 } | Format-Table -AutoSize
 
 # 3) No cluster resource references a ghost path.
+$paramErrors = New-Object System.Collections.Generic.List[string]
 Get-ClusterResource | ForEach-Object {
     $r = $_
     try {
@@ -1044,8 +1066,18 @@ Get-ClusterResource | ForEach-Object {
                 [pscustomobject]@{ Resource = $r.Name; Parameter = $_.Name; Value = $_.Value }
             }
         }
-    } catch { }
+    }
+    catch {
+        # Benign for resource types that expose no parameters; record the rest so a genuine
+        # query failure does not let the verification pass on reduced coverage.
+        $paramErrors.Add($r.Name)
+    }
 } | Format-Table -AutoSize
+
+if ($paramErrors.Count) {
+    Write-Warning ("{0} cluster resource(s) did not return parameters and were not inspected: {1}" -f `
+        $paramErrors.Count, ($paramErrors -join ', '))
+}
 
 # 4) Cluster roles and resources are healthy.
 Get-ClusterGroup    | Format-Table Name, OwnerNode, State -AutoSize
