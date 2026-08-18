@@ -143,7 +143,7 @@ The `CannotPoolReason` column uses the exact title-case strings that `Get-Physic
 | `Offline` | The disk is offline to Windows. | Use [Step 2f](#step-2f-resolve-offline-or-read-only-disk-state). |
 | `Insufficient Capacity` | The disk does not have enough usable free capacity. This can be because the disk is too small for Azure Local, or because partitions consume the free space. | Use [Step 2g](#step-2g-resolve-insufficient-capacity-or-removable-media). |
 | `Verification In Progress` | Health Service is checking whether the disk and firmware are approved for the solution. | Use [Step 2d](#step-2d-resolve-verification-in-progress-or-verification-failed). Wait, then recheck. |
-| `Verification Failed` | Health Service could not complete supportability verification. | Use [Step 2d](#step-2d-resolve-verification-in-progress-or-verification-failed). Escalate persistent cases to PR 333 ownership. |
+| `Verification Failed` | Health Service could not complete supportability verification. | Use [Step 2d](#step-2d-resolve-verification-in-progress-or-verification-failed). Escalate persistent cases to Microsoft Support (CSS). |
 | `Firmware Not Compliant` | The disk firmware is not approved by the solution vendor support data. | Use [Step 2e](#step-2e-resolve-hardware-not-compliant-or-firmware-not-compliant). |
 | `Hardware Not Compliant` | The disk model is not approved by the solution vendor support data. | Use [Step 2e](#step-2e-resolve-hardware-not-compliant-or-firmware-not-compliant). |
 
@@ -244,7 +244,7 @@ Get-VirtualDisk                      | Format-Table FriendlyName, HealthStatus, 
 ```
 
 > [!WARNING]
-> Do not reset or manually add disks while verification is still in progress or failed. If `Verification In Progress` or `Verification Failed` remains unchanged after the normal wait of about 10 to 15 minutes and the disk is clean, supported, online, and symmetric, stop this decision tree and use the dedicated Health Service verification-stuck TSG from PR 333 or spec `AzLocal_Storage_PhysicalDiskVerificationStuck`. That companion owns Health resource, SDDC Group, and provider-list repair.
+> Do not reset or manually add disks while verification is still in progress or failed. If `Verification In Progress` or `Verification Failed` remains unchanged after the normal wait of about 10 to 15 minutes and the disk is clean, supported, online, and symmetric, stop this decision tree and use the dedicated Health Service verification-stuck guide, [Troubleshoot physical disks stuck in verification (`CanPool=False`)](./Troubleshoot-Storage-PhysicalDiskVerificationStuck.md) (spec `AzLocal_Storage_PhysicalDiskVerificationStuck`), which owns Health resource, SDDC Group, and provider-list repair. If that guide is not yet present in your copy of this repo, engage Microsoft Support (CSS) for the Health Service / SDDC provider-list repair rather than editing the `Providers` cluster parameter yourself.
 
 ### Step 2e: Resolve `Hardware Not Compliant` or `Firmware Not Compliant`
 
@@ -452,8 +452,10 @@ New-Item -ItemType Directory -Path $evidenceRoot -Force | Out-Null
 
 # Note: Start-AzsSupportStorageDiagnostic stops any outer Start-Transcript when it runs,
 # so do not rely on Start-Transcript to capture this cmdlet. Redirect all streams instead.
-# Record the cmdlet working directory and a start time so its native transcript can be copied out.
-$diagWorkingDir = (Get-Location).Path
+# Record the tool's own working directory (where AzsSupport writes its native transcript, for
+# example Start-AzsSupportStorageDiagnostic_TraceOutput_*.csv) and a start time so that transcript
+# can be copied out. Fall back to the current directory only if the cmdlet is unavailable.
+$diagWorkingDir = try { Get-AzsSupportWorkingDirectory } catch { (Get-Location).Path }
 $runStart = Get-Date
 
 # Capture ALL streams (success, error, warning, verbose, host, and information) with no ConvertTo-Json.
@@ -462,7 +464,7 @@ Start-AzsSupportStorageDiagnostic -Include 'MissingDisks','DiskHealth','StorageH
 
 # Copy the native tool transcript the cmdlet writes in its own working directory into the evidence package.
 Get-ChildItem -Path $diagWorkingDir -Recurse -File |
-    Where-Object { $_.LastWriteTime -ge $runStart -and $_.Extension -in '.txt','.log','.etl','.zip' } |
+    Where-Object { $_.LastWriteTime -ge $runStart -and $_.Extension -in '.txt','.log','.etl','.zip','.csv' } |
     ForEach-Object { Copy-Item -Path $_.FullName -Destination $evidenceRoot -Force }
 ```
 
@@ -478,7 +480,7 @@ Start-AzsSupportStorageDiagnostic -PhysicalExtentCheck $virtualDiskFriendlyName 
 
 # Copy the native tool transcript for this run into the evidence package as well.
 Get-ChildItem -Path $diagWorkingDir -Recurse -File |
-    Where-Object { $_.LastWriteTime -ge $extentStart -and $_.Extension -in '.txt','.log','.etl','.zip' } |
+    Where-Object { $_.LastWriteTime -ge $extentStart -and $_.Extension -in '.txt','.log','.etl','.zip','.csv' } |
     ForEach-Object { Copy-Item -Path $_.FullName -Destination $evidenceRoot -Force }
 ```
 
