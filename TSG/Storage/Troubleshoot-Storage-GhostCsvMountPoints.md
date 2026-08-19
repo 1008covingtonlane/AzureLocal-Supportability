@@ -382,12 +382,18 @@ Check the **`ReparsePoint` file attribute**, which is the authoritative signal.
 > a live volume can show a blank `LinkType` and be mistaken for ordinary leftover
 > files. The attribute check below does not have that failure mode.
 
+> [!IMPORTANT]
+> The scan below is **recursive** on purpose. A volume mount point does not have to sit at
+> the top of the ghost root: it can be nested inside an ordinary-looking leftover folder.
+> A top-level-only check would classify that as "ordinary leftover files" and send you to
+> Path A, and the cleanup would then be deleting live storage.
+
 ```powershell
 Get-ChildItem -Path 'C:\' -Directory -Filter 'ClusterStorage.*' -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -match '^ClusterStorage\.\d+$' } |
     ForEach-Object {
         $root = $_.FullName
-        $children = Get-ChildItem -LiteralPath $root -Force -ErrorAction SilentlyContinue
+        $children = Get-ChildItem -LiteralPath $root -Force -Recurse -ErrorAction SilentlyContinue
         if (-not $children) {
             [pscustomobject]@{ GhostRoot = $root; Child = '<empty>'; IsReparsePoint = $false; Detail = '' }
         }
@@ -720,14 +726,18 @@ Combine the results and place the cluster in exactly one category.
                            while ($p -and $depth -lt 50) {
                                $vhd = Get-VHD -Path $p -ErrorAction SilentlyContinue
                                if (-not $vhd) {
-                                   if ($depth -gt 0) {
-                                       $errors.Add("Get-VHD could not read '$p' in the parent chain of $($vm.Name); coverage incomplete")
-                                   }
+                                   # FAIL CLOSED at every depth, including the attached leaf.
+                                   # An unreadable disk means we cannot prove its parent chain is
+                                   # clean, so it is a blocker, not a pass.
+                                   $errors.Add("Get-VHD could not read '$p' (chain of $($vm.Name), depth $depth); parent-chain coverage incomplete")
                                    break
                                }
                                $p = $vhd.ParentPath
                                if ($p -and ($p -match $Pattern)) { $hits.Add("VMDiskParent: $($vm.Name) -> $p") }
                                $depth++
+                           }
+                           if ($depth -ge 50) {
+                               $errors.Add("Parent chain of $($vm.Name) exceeded 50 links; not fully walked")
                            }
                        }
                        foreach ($prop in 'ConfigurationLocation','SnapshotFileLocation','SmartPagingFilePath') {
@@ -840,12 +850,27 @@ Combine the results and place the cluster in exactly one category.
            Where-Object { $_.Name -match '^ClusterStorage\.\d+$' }
 
        # Never recurse into a reparse point: that can delete the target volume's data.
-       $unsafe = foreach ($t in $targets) {
-           Get-ChildItem -LiteralPath $t.FullName -Force -Recurse -ErrorAction SilentlyContinue |
-               Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReparsePoint }
+       # This scan uses -ErrorAction Stop on purpose. Suppressing enumeration errors here
+       # would let an unreadable subtree hide the very reparse point this gate exists to
+       # find, so an enumeration failure is treated as unsafe rather than as "nothing found".
+       $unsafe    = @()
+       $scanError = $null
+       foreach ($t in $targets) {
+           try {
+               $unsafe += Get-ChildItem -LiteralPath $t.FullName -Force -Recurse -ErrorAction Stop |
+                   Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReparsePoint }
+           }
+           catch {
+               $scanError = "Could not fully enumerate $($t.FullName): $($_.Exception.Message)"
+               break
+           }
        }
 
-       if ($unsafe) {
+       if ($scanError) {
+           Write-Warning "Refusing to delete. The safety scan could not complete:"
+           Write-Warning $scanError
+       }
+       elseif ($unsafe) {
            Write-Warning "Reparse points found inside ghost roots. Refusing to delete:"
            $unsafe | Select-Object FullName
        }
@@ -855,10 +880,22 @@ Combine the results and place the cluster in exactly one category.
        else {
            Write-Host "About to permanently delete on $($env:COMPUTERNAME):" -ForegroundColor Yellow
            $targets | ForEach-Object { Write-Host "   $($_.FullName)" -ForegroundColor Yellow }
-           $answer = Read-Host "Type DELETE to confirm"
+           Write-Host "Type DELETE (uppercase) to confirm. Anything else cancels." -ForegroundColor Yellow
+           $answer = Read-Host "Confirm"
            if ($answer -ceq 'DELETE') {
                foreach ($t in $targets) {
-                   Remove-Item -LiteralPath $t.FullName -Recurse -Force
+                   # Re-check this specific root immediately before removing it, so a reparse
+                   # point created between the scan above and this moment cannot be followed.
+                   $lateCheck = @(Get-ChildItem -LiteralPath $t.FullName -Force -Recurse -ErrorAction Stop |
+                       Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReparsePoint })
+                   if ($lateCheck.Count -gt 0) {
+                       Write-Warning "Skipping $($t.FullName): a reparse point appeared since the scan."
+                       continue
+                   }
+                   # [System.IO.Directory]::Delete removes a reparse point as a LINK rather than
+                   # following it into the target, which Remove-Item -Recurse does not guarantee
+                   # on Windows PowerShell 5.1.
+                   [System.IO.Directory]::Delete($t.FullName, $true)
                    Write-Host "Removed $($t.FullName)"
                }
            }
