@@ -195,39 +195,74 @@ While this check fails, **Azure Arc cluster connect does not work** for this clu
 
 ### 5. Remediation
 
-Match the `Detail` signature from step 2 to the sub-mode and apply the matching fix. All of these are network-side changes; none of them drain nodes or disrupt running VMs. The canonical endpoint list is in [Azure Arc-enabled Kubernetes network requirements](https://learn.microsoft.com/en-us/azure/azure-arc/kubernetes/network-requirements) and, for AKS on Azure Local, [AKS network requirements - firewall URL exceptions](https://learn.microsoft.com/en-us/azure/aks/hybrid/aks-hci-network-system-requirements#firewall-url-exceptions).
+Match the `Detail` signature from step 2 to the sub-mode and apply **only** the matching fix. The canonical endpoint list is in [Azure Arc-enabled Kubernetes network requirements](https://learn.microsoft.com/en-us/azure/azure-arc/kubernetes/network-requirements) and, for AKS on Azure Local, [AKS network requirements - firewall URL exceptions](https://learn.microsoft.com/en-us/azure/aks/hybrid/aks-hci-network-system-requirements#firewall-url-exceptions).
+
+> [!IMPORTANT]
+> **Apply one sub-mode fix at a time, and stop when the check passes.** Every fix below
+> changes network configuration that other systems depend on. If you are unsure which
+> sub-mode applies, re-read step 2 rather than applying several fixes at once.
+>
+> **These changes are owned by the customer's network or platform team**, not by this
+> guide. DNS servers, firewall rules, proxy configuration, and TLS-inspection policy are
+> all outside the Azure Local support boundary. Confirm the change with the owning team
+> and follow the customer's change process before you make it. Record the current value
+> first so every change can be reversed.
 
 **Sub-mode: DNS resolution** (`The remote name could not be resolved`, `tnc: False`).
 
-1. On an affected node, confirm the relay hostname resolves: `Resolve-DnsName azgnrelay-<region>-l1.servicebus.windows.net`.
-2. If it does not resolve, fix the node's DNS: confirm `Get-DnsClientServerAddress` points at DNS servers that can resolve public Azure names (or the customer's forwarders that do). See [Troubleshooting Connectivity Test DNS](./Troubleshooting-Connectivity-Test-Dns.md) and [Troubleshooting DNS External DNS Resolution](./Troubleshooting-DNS-External-DNS-Resolution.md).
-3. Re-test with step 1.
+> [!WARNING]
+> A cluster node's DNS configuration is also how it finds Active Directory, the cluster
+> name, and its own management endpoints. Pointing a node at a public resolver such as
+> `8.8.8.8` to make this one lookup succeed will break domain and cluster name
+> resolution. **Never set a node's DNS to a public resolver.** The correct fix is to make
+> the customer's existing DNS servers resolve the public name, normally by fixing their
+> forwarders.
 
-Risk: [LOW RISK]. Correcting DNS resolution does not disrupt running workloads.
+1. On an affected node, confirm the relay hostname resolves: `Resolve-DnsName azgnrelay-<region>-l1.servicebus.windows.net`.
+2. Record the current setting before changing anything, so the change is reversible:
+
+   ```powershell
+   Get-DnsClientServerAddress -AddressFamily IPv4 |
+       Select-Object InterfaceAlias, InterfaceIndex, ServerAddresses
+   ```
+
+3. If it does not resolve, the fix belongs on the DNS servers the node already uses: confirm `Get-DnsClientServerAddress` points at the customer's DNS servers, and have the DNS owner make those servers resolve public Azure names (normally by correcting their forwarders). Do not repoint the node. See [Troubleshooting Connectivity Test DNS](./Troubleshooting-Connectivity-Test-Dns.md) and [Troubleshooting DNS External DNS Resolution](./Troubleshooting-DNS-External-DNS-Resolution.md).
+4. Re-test with step 1.
+
+Risk: [MEDIUM RISK] if a node's DNS servers are changed, because a node's DNS configuration also serves Active Directory and cluster name resolution, and a wrong value can break domain join, cluster communication, and management. [LOW RISK] when the fix is made on the DNS servers themselves (correcting forwarders), which is the recommended path and does not disrupt running workloads.
 
 **Sub-mode: firewall / outbound 443 blocked** (`Unable to connect to the remote server` or `timed out`, `tnc: False`).
 
-1. Allow outbound **TCP 443** from every node to the Azure Relay endpoints used by cluster connect: `*.servicebus.windows.net` (specifically `azgnrelay-<region>-l1.servicebus.windows.net`). Add these to the firewall allow list per [Azure Arc-enabled Kubernetes network requirements](https://learn.microsoft.com/en-us/azure/azure-arc/kubernetes/network-requirements) and the [AKS on Azure Local firewall URL exceptions](https://learn.microsoft.com/en-us/azure/aks/hybrid/aks-hci-network-system-requirements#firewall-url-exceptions).
-2. Confirm no route or NSG drops the outbound connection to the relay.
+1. Allow outbound **TCP 443** from every node to the Azure Relay endpoints used by cluster connect: `*.servicebus.windows.net` (specifically `azgnrelay-<region>-l1.servicebus.windows.net`). Add these to the firewall allow list per [Azure Arc-enabled Kubernetes network requirements](https://learn.microsoft.com/en-us/azure/azure-arc/kubernetes/network-requirements) and the [AKS on Azure Local firewall URL exceptions](https://learn.microsoft.com/en-us/azure/aks/hybrid/aks-hci-network-system-requirements#firewall-url-exceptions). This is normally the **perimeter or edge firewall**, not the Windows firewall on the node; Azure Local nodes do not block this outbound traffic by default. Confirm with the network owner which device enforces the block before changing anything.
+2. Confirm no route or Network Security Group (NSG) drops the outbound connection to the relay. Route and NSG changes are owned by the network team.
 3. Re-test with `Test-NetConnection azgnrelay-<region>-l1.servicebus.windows.net -Port 443` from the node.
 
-Risk: [LOW RISK]. Allowing the documented outbound endpoint does not disrupt running workloads.
+Risk: [LOW RISK] to the cluster. Allowing the documented outbound endpoint does not disrupt running workloads, but it is a change to customer network policy and needs the network owner's approval.
 
 **Sub-mode: proxy** (`Unable to connect to the remote server`, `tnc: True`).
 
 1. If the cluster uses a proxy, confirm the proxy is configured on the nodes and allows `*.servicebus.windows.net`. See the proxy guidance in [Troubleshooting External Connectivity Failures in Environment Checker](./Troubleshooting-External-Connectivity-Failures-in-Environment-Checker.md).
-2. Confirm the node's proxy configuration (WinHTTP / environment) matches the cluster's documented proxy, and that the relay endpoints are not on a bypass list that routes them incorrectly.
+2. Confirm the node's proxy configuration matches the cluster's documented proxy, and that the relay endpoints are not on a bypass list that routes them incorrectly. Read the current values before changing them:
+
+   ```powershell
+   netsh winhttp show proxy
+   [Environment]::GetEnvironmentVariable('HTTPS_PROXY','Machine')
+   [Environment]::GetEnvironmentVariable('HTTP_PROXY','Machine')
+   [Environment]::GetEnvironmentVariable('NO_PROXY','Machine')
+   ```
+
+   Report a mismatch to the platform owner rather than editing it ad hoc: the proxy configuration is applied and maintained by the Azure Local deployment, and an out-of-band edit can be overwritten or can break other platform traffic.
 3. Re-test with step 1.
 
-Risk: [LOW RISK]. A proxy allow-list change does not disrupt running workloads.
+Risk: [MEDIUM RISK] if node proxy settings are edited directly, because the proxy carries all node outbound traffic including Arc and update traffic. [LOW RISK] for a proxy allow-list change made on the proxy itself.
 
 **Sub-mode: TLS inspection** (`The underlying connection was closed: An unexpected error occurred on a send`, `tnc: True`).
 
-1. Exclude the Azure Relay endpoints (`*.servicebus.windows.net`) from any TLS-inspection / deep-packet-inspection / SSL-interception appliance on the outbound path. The cluster-connect relay uses a long-lived connection that inspection appliances break.
-2. Confirm with the network team that the relay endpoints are on the inspection bypass list.
+1. Exclude the Azure Relay endpoints (`*.servicebus.windows.net`) from any TLS-inspection, deep-packet-inspection, or SSL-interception appliance on the outbound path. These are middleboxes that terminate and re-sign TLS so they can inspect the traffic; the cluster-connect relay uses a long-lived connection that they break.
+2. Confirm with the network team that the relay endpoints are on the inspection bypass list. This is a security-policy change and needs their approval and their change record.
 3. Re-test with step 1.
 
-Risk: [LOW RISK]. Excluding the endpoint from interception does not disrupt running workloads.
+Risk: [LOW RISK] to the cluster. Excluding the endpoint from interception does not disrupt running workloads, but it changes the customer's security enforcement and must be agreed with the security or network owner.
 
 ### 6. Verification: prove the failure cleared
 
