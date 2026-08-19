@@ -294,10 +294,14 @@ including a per-node fan-out to find every affected node and an option-by-option
 tree for the fix.
 
 **Most common fix (start here).** The usual cause is a node pointed at a DNS server that
-cannot resolve external names. Re-point that node's management adapter at a DNS server
-that can (step 3, first option), or add an external-resolving forwarder on the current
-server (step 3, second option). The numbered steps confirm which applies; most failures
-are resolved by one of those two.
+cannot resolve external names, and the **supported** fix depends on whether the cluster is
+already deployed (see [Quick fix](#quick-fix-start-here)). On an **already-deployed**
+cluster, do **not** re-point the node's DNS client (unsupported post-deployment); make the
+currently-configured server resolve the external name by adding an external-resolving
+forwarder (step 3, second option). Only when **deploying or adding a node** may you
+re-point that node's management adapter at a DNS server that can resolve (step 3, first
+option). The numbered steps confirm which server is failing; fix it the way that matches
+your situation.
 
 _New to any DNS term used here (A record, forwarder, split-horizon, WinHTTP proxy)? See
 the [Glossary](#glossary) at the end of this guide._
@@ -325,8 +329,10 @@ the [Glossary](#glossary) at the end of this guide._
 
 3. Fix the failing DNS server, choosing the option that matches the environment:
 
-   - If the configured server is wrong or stale, re-point the node's management adapter
-     at a DNS server that can resolve external names. First identify the management
+   - If the configured server is wrong or stale, and the node is **not yet a deployed
+     cluster member** (deploying or adding a node), re-point the node's management adapter
+     at a DNS server that can resolve external names. On an already-deployed cluster this
+     is unsupported; use the forwarder option below instead. First identify the management
      adapter (the up adapter whose IPv4 address is the node's management IP), so the
      `<ManagementAdapter>` placeholder is concrete:
 
@@ -357,10 +363,11 @@ the [Glossary](#glossary) at the end of this guide._
    present, this check self-skips and reports success. Only do this if a proxy is
    genuinely part of the design.
 
-Re-pointing a node's DNS client is a [LOW RISK] change: it is per-node, immediate, and
-reversible by restoring the previous servers. Changing an upstream DNS server is a
-[MEDIUM RISK] change, because it can affect other systems that use it, so coordinate with
-its owner. No node drain or reboot is required for DNS-client changes.
+Re-pointing a node's DNS client (deployment or add-node time only) is a [LOW RISK] change:
+it is per-node, immediate, and reversible by restoring the previous servers. On an
+already-deployed cluster that path is unsupported, so the fix is the upstream DNS server or
+forwarder change, a [MEDIUM RISK] change because it can affect other systems that use it,
+so coordinate with its owner. No node drain or reboot is required for DNS-client changes.
 
 ## Verify the fix
 
