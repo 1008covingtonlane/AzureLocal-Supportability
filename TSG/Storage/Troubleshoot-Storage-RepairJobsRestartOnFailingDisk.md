@@ -39,7 +39,8 @@ An important trap: this scenario is frequently misread as a capacity problem, be
 
 - `Get-StorageJob` shows one or more `<Volume>-Repair` and `<Volume>-Regeneration` jobs that reset: `PercentComplete` returns to `0`, `BytesTotal` shrinks or changes between samples, and the job's elapsed time resets. Job count never drops to zero.
 - `Get-VirtualDisk` shows a volume at `OperationalStatus = {No Redundancy, InService}` (or `{Incomplete, InService}` on a two-copy volume) and `HealthStatus = Unhealthy`.
-- `Get-PhysicalDisk` shows one drive with `OperationalStatus = "OK, Abnormal Latency"` while `HealthStatus` is still `Healthy`.
+- `Get-PhysicalDisk` shows one drive with `OperationalStatus = "OK, Abnormal Latency"` while `HealthStatus` is still `Healthy`. This is the high-latency variant, and the still-`Healthy` status is exactly why it is easy to miss.
+- In the related **lost-communication** variant the drive reports `OperationalStatus = "Lost Communication"` and `HealthStatus` becomes **`Warning`**, not `Healthy`. Both variants produce the same stuck-repair symptom, so filter on `OperationalStatus`, never on `HealthStatus -eq 'Healthy'` alone, or you will miss this one.
 - `Get-HealthFault` reports a combination of:
   - `Microsoft.Health.FaultType.PhysicalDisk.HighLatency.Outlier.AverageIO` (average latency orders of magnitude above the peer drives; in the worked case below, roughly 585 times).
   - `Microsoft.Health.FaultType.PhysicalDisk.HighErrorCount.Outlier.AverageIO` (I/O error count far above peer drives).
@@ -66,7 +67,8 @@ Get-PhysicalDisk | Select-Object FriendlyName, SerialNumber, Usage, HealthStatus
 Get-HealthFault | Select-Object FaultType, PerceivedSeverity, Reason, FaultingObjectDescription
 
 # 3. Reliability counters: the hard evidence. On a real failing drive you see read/write
-#    error totals in the thousands to millions and max latency in seconds, not milliseconds.
+#    error totals in the thousands to millions, and a max latency of thousands of ms
+#    (that is, whole seconds of wall-clock) where healthy peers are in the tens of ms.
 Get-PhysicalDisk -SerialNumber <SerialNumber> | Get-StorageReliabilityCounter |
   Select-Object ReadErrorsTotal, ReadErrorsUncorrected, WriteErrorsTotal, ReadLatencyMax, WriteLatencyMax, PowerOnHours
 ```
@@ -324,9 +326,13 @@ loss, and a copied or mistyped `UniqueId` is how that happens.
 $DiskUniqueId = '<DiskUniqueId>'   # the value you recorded in Step 2
 
 # Read the drive back and confirm it is the one you diagnosed, BEFORE changing anything.
-Get-PhysicalDisk -UniqueId $DiskUniqueId |
-    Select-Object FriendlyName, SerialNumber, HealthStatus,
-                  @{n='Op';e={$_.OperationalStatus -join ','}}, Usage, PhysicalLocation
+$disk = Get-PhysicalDisk -UniqueId $DiskUniqueId
+$disk | Select-Object FriendlyName, SerialNumber, MediaType, Usage, HealthStatus,
+                      @{n='Op';e={$_.OperationalStatus -join ','}}, PhysicalLocation
+
+# The node that physically hosts the drive. The prose below asks you to confirm the node,
+# so read it here rather than assuming the node you happen to be signed in to.
+$disk | Get-StorageNode -PhysicallyConnected | Select-Object Name
 ```
 
 Confirm the output shows the **same serial number and the same node** you identified in
@@ -347,10 +353,17 @@ Get-PhysicalDisk -UniqueId $DiskUniqueId | Select-Object FriendlyName, Usage, Op
 ```
 
 > [!NOTE]
-> **A retire is reversible.** `Set-PhysicalDisk -UniqueId <DiskUniqueId> -Usage AutoSelect`
-> returns the drive to normal use and the pool rebalances. If you realize you retired
-> the wrong drive, set it straight back. Do **not** escalate to `Remove-PhysicalDisk`,
-> which is not reversible.
+> **A retire is reversible, with one important limit.**
+> `Set-PhysicalDisk -UniqueId <DiskUniqueId> -Usage AutoSelect` returns the drive to normal
+> use and the pool rebalances. Use it **only** when you have just retired the WRONG drive and
+> want to undo that mistake.
+>
+> Do **not** use it to "cancel" a rebuild that is under way on the genuinely failing drive.
+> Putting a dying drive back into service mid-evacuation restarts the original stuck-repair
+> condition and can leave volumes degraded for longer. If a rebuild is slow, let it finish or
+> engage support; do not un-retire the bad drive.
+>
+> Do **not** escalate to `Remove-PhysicalDisk`, which is not reversible.
 >
 > Note the spelling: `Get-PhysicalDisk` **displays** the usage as `Auto-Select` with a
 > hyphen, but `Set-PhysicalDisk -Usage` takes the enum value `AutoSelect` with no
@@ -382,19 +395,57 @@ Repair-VirtualDisk -FriendlyName <VolumeName>
 
 During evacuation the pool used percentage rises briefly as replacement copies are written, then settles as the retired drive's slabs are released. This is expected.
 
-The rebuild is complete when all of the following are true: `Get-StorageJob` returns nothing, every volume is `HealthStatus = Healthy` / `OperationalStatus = OK`, the `VirtualDisks.NoRedundancy` and `LastCopy` faults have cleared, and the retired drive's used capacity (`AllocatedSize`) has dropped to near zero because its data now lives elsewhere. Only then proceed to Step 6.
+The rebuild is complete when all of the following are true: **no `Repair` or `Regeneration` job remains**, every volume is `HealthStatus = Healthy` / `OperationalStatus = OK`, the `VirtualDisks.NoRedundancy` and `LastCopy` faults have cleared, and the retired drive's used capacity (`AllocatedSize`) has dropped to near zero because its data now lives elsewhere. Only then proceed to Step 6.
+
+> [!NOTE]
+> Do not use a bare "`Get-StorageJob` returns nothing" as the completion test. `Get-StorageJob`
+> also returns pool `Optimize`, `Rebalance`, and `Trim` jobs, which are unrelated to this repair
+> and can run for a long time, so waiting for a completely empty list can block Step 6
+> indefinitely. Test for the repair jobs specifically:
+
+```powershell
+# The rebuild-complete predicate: no Repair/Regeneration job left for any volume.
+$rebuild = @(Get-StorageJob | Where-Object { $_.Name -match 'Repair|Regeneration' -and $_.JobState -notin @('Completed','Failed') })
+if ($rebuild.Count -eq 0) { "Rebuild complete." } else { $rebuild | Select-Object Name, JobState, PercentComplete }
+```
 
 #### Step 6: Physically replace and remove the drive  [MEDIUM RISK]
 
-Only after the rebuild jobs reach zero and the volumes are Healthy:
+Only after the rebuild jobs reach zero and the volumes are Healthy.
+
+> [!WARNING]
+> `Remove-PhysicalDisk` is **not reversible**, so it needs the same identity check as Step 4,
+> and it is often run in a new session hours later. Re-read the drive before you remove it,
+> and confirm the state below, rather than trusting an identifier pasted from earlier notes.
+
+```powershell
+$DiskUniqueId = '<DiskUniqueId>'   # re-paste from Step 2 and re-verify below
+
+# Re-read and confirm: this must still be the RETIRED drive, evacuated (AllocatedSize near 0).
+$disk = Get-PhysicalDisk -UniqueId $DiskUniqueId
+$disk | Select-Object FriendlyName, SerialNumber, Usage, HealthStatus,
+                      @{n='Op';e={$_.OperationalStatus -join ','}},
+                      @{n='AllocatedGB';e={[math]::Round($_.AllocatedSize/1GB,2)}}, PhysicalLocation
+$disk | Get-StorageNode -PhysicallyConnected | Select-Object Name
+
+if ($disk.Usage -ne 'Retired') { throw "Refusing: drive Usage is '$($disk.Usage)', expected 'Retired'. Do not remove it." }
+if ($disk.AllocatedSize -gt 1GB) { throw "Refusing: drive still holds $([math]::Round($disk.AllocatedSize/1GB,2)) GB. Let the rebuild finish first." }
+```
+
+Confirm the `SerialNumber` and node above match the drive you diagnosed, then light the bay:
 
 ```powershell
 # Turn on the location indicator (if supported) to find the drive in the chassis.
-Get-PhysicalDisk -UniqueId <DiskUniqueId> | Enable-PhysicalDiskIdentification
+$disk | Enable-PhysicalDiskIdentification
+```
 
+**Now go to the chassis and confirm the lit bay's serial sticker matches `SerialNumber` above before anything is unplugged.** Only then remove it from the pool:
+
+```powershell
 # Remove the retired drive from the pool, then physically swap it. Remove-PhysicalDisk has
 # no -UniqueId parameter, so resolve the disk object and pass it via -PhysicalDisks.
-Remove-PhysicalDisk -PhysicalDisks (Get-PhysicalDisk -UniqueId <DiskUniqueId>) -StoragePoolFriendlyName <PoolName>
+# Discover <PoolName> with: Get-StoragePool | Where-Object IsPrimordial -eq $false | Select-Object FriendlyName
+Remove-PhysicalDisk -PhysicalDisks $disk -StoragePoolFriendlyName <PoolName>
 ```
 
 The physical drive replacement is a hardware task: engage the OEM or your hardware vendor and follow their drive-replacement procedure for the chassis (the location indicator above lights the drive bay on Dell, HPE, and Lenovo servers). Expected end state: a replacement drive of a supported model is claimed automatically, S2D rebalances onto it, and every drive and volume returns to Healthy. No manual repair trigger is normally required. To add the replacement manually, see the guide for adding physical disks to the S2D pool: `TSG/Storage/HowTo-Storage-AddPhysicalDisksToS2DPool.md`.
