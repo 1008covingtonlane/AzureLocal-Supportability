@@ -41,7 +41,7 @@ An important trap: this scenario is frequently misread as a capacity problem, be
 - `Get-VirtualDisk` shows a volume at `OperationalStatus = {No Redundancy, InService}` (or `{Incomplete, InService}` on a two-copy volume) and `HealthStatus = Unhealthy`.
 - `Get-PhysicalDisk` shows one drive with `OperationalStatus = "OK, Abnormal Latency"` while `HealthStatus` is still `Healthy`.
 - `Get-HealthFault` reports a combination of:
-  - `Microsoft.Health.FaultType.PhysicalDisk.HighLatency.Outlier.AverageIO` (average latency thousands to millions of times the peer drives).
+  - `Microsoft.Health.FaultType.PhysicalDisk.HighLatency.Outlier.AverageIO` (average latency orders of magnitude above the peer drives; in the worked case below, roughly 585 times).
   - `Microsoft.Health.FaultType.PhysicalDisk.HighErrorCount.Outlier.AverageIO` (I/O error count far above peer drives).
   - `Microsoft.Health.FaultType.VirtualDisks.NoRedundancy` (Critical) and `Microsoft.Health.FaultType.VirtualDisks.LastCopy` (Warning).
   - Often also `Microsoft.Health.FaultType.StoragePool.PoolCapacityThresholdExceeded` and `Microsoft.Health.FaultType.Server.Storage.Degraded`.
@@ -73,10 +73,38 @@ Get-PhysicalDisk -SerialNumber <SerialNumber> | Get-StorageReliabilityCounter |
 
 Example from a real case: `ReadErrorsTotal = 1,252,510`, `ReadLatencyMax = 11,708` ms (healthy peers are under ~20 ms), `PowerOnHours = 32,273` (about 3.7 years). In that case `ReadErrorsUncorrected = 0`, which is why the rebuild recovered all data. A drive with non-zero *uncorrected* errors that also holds the last copy is the data-loss case to worry about.
 
+> [!NOTE]
+> **Reliability counters are not always populated.** `Get-StorageReliabilityCounter` depends
+> on the drive and the controller passing the counters through. Behind some HBAs and RAID
+> controllers, and on some NVMe devices, it returns nulls or all zeros even for a drive that
+> is genuinely dying. **Empty counters are not evidence that the drive is healthy.** When they
+> come back empty, fall back to the other signals on this page, which do not depend on the
+> counters: the `OperationalStatus` of `"OK, Abnormal Latency"` or `Lost Communication`, the
+> `Get-HealthFault` latency and error outliers on physical hardware, the
+> `Microsoft-Windows-StorageSpaces-Driver` events 203, 205, 207 and 209, and the stuck-repair
+> job pattern itself. Also collect the vendor's own drive diagnostics.
+
 ### Windows event log (on the node hosting the drive)
 
 - `disk` **153** "The IO operation ... was retried" (leading indicator, often hundreds per hour).
 - `Microsoft-Windows-StorageSpaces-Driver` **203** (failed IO / STATUS_DEVICE_NOT_CONNECTED), **205** (lost communication), **207** (drive "arrived" repeatedly, meaning it is flapping), **209** (failed Read IO / I/O device error).
+
+> [!IMPORTANT]
+> **Rule out the shared storage path before condemning a drive.** Lost-communication and
+> flapping events (203, 205, 207) say the connection to the device failed. They do not by
+> themselves say the *drive* is at fault: a failing cable, SAS expander, backplane, or drive
+> slot produces the same events. Two quick discriminators:
+>
+> - **Is it one drive or several?** If multiple drives behind the same controller, backplane,
+>   or enclosure are reporting together, suspect the shared path, not the drives. Group the
+>   suspects by `PhysicalLocation` and by node.
+> - **Do the drive's own counters agree?** High `ReadErrorsUncorrected` and multi-second
+>   `ReadLatencyMax` on **only** this drive point at the drive. Clean counters with repeated
+>   203/205/207 point at the path.
+>
+> If the evidence points at the path, engage the hardware vendor for the cable, backplane, or
+> controller rather than replacing a healthy drive. Retiring is still safe in the meantime,
+> because it only evacuates data, but a drive swap will not fix a path fault.
 - `Microsoft-Windows-StorageSpaces-Driver` **312** (write failed to all copies), **302** (space metadata update failed), **304** and **305** (virtual disk degraded, then healthy).
 
 ```powershell
@@ -132,7 +160,7 @@ Confirm the actual scheme before you act: `Get-VirtualDisk -FriendlyName <vol> |
 
 If the failing drive holds the last currently-available copy (or a required parity element) of a region, that region shows as `No Redundancy` (or `Incomplete` on a two-copy volume), and the drive appears in `Get-PhysicalDisk -NoRedundancy` for the affected volume.
 
-Under heavy write I/O, the same non-completing drive can leave a storage completion routine holding the processor dispatch level too long, which trips the DPC watchdog and bugchecks the node. That is why a node crash and a stuck repair frequently share one cause.
+Under heavy write I/O, the same non-completing drive can leave a storage completion routine holding the processor dispatch level too long, which can trip the DPC watchdog and bugcheck the node with `DPC_WATCHDOG_VIOLATION` (`0x133`). That is a plausible shared cause when a node crash and a stuck repair happen together, but do not assume it. **Confirm the attribution before you report it**: open the dump and check that the stack actually implicates the storage completion path (`storport.sys`, `stornvme.sys`, the miniport, or `spaceport.sys`), and note the first bugcheck parameter, where `0` is a single DPC that ran too long and `1` is the system spending too long at DISPATCH_LEVEL overall. A `0x133` with an unrelated stack is a different problem that happens to coincide with this one.
 
 Why capacity is a red herring here:
 
@@ -140,6 +168,21 @@ Why capacity is a red herring here:
 - On thin-provisioned volumes, deleting files frees space inside the volume but does not necessarily return the freed slabs to the pool. `Optimize-Volume -ReTrim` issues the unmap, but the pool may not reclaim the capacity for a long time, if at all, within a maintenance window. Do not expect deleting data to create rebuild headroom quickly.
 
 ## Glossary
+
+**Reading the commands on this page.** Anything in angle brackets, such as `<DiskUniqueId>`, `<SerialNumber>`, `<VolumeName>`, or `<PoolName>`, is a **placeholder you must replace** with the value you recorded in an earlier step. Do not paste the angle brackets.
+
+**Acronyms used on this page.**
+
+| Acronym | Meaning |
+| --- | --- |
+| **S2D** | Storage Spaces Direct, the software-defined storage layer that pools the drives across nodes. |
+| **CSV** | Cluster Shared Volume, a volume every node can access at the same time. It appears as a folder under `C:\ClusterStorage`. |
+| **CAU** | Cluster-Aware Updating, the automation that patches cluster nodes one at a time. Check for an active run with `Get-CauRun` before making storage changes. |
+| **SDDC** | Software-Defined Data Center, the name of the cluster Health Service that reports health faults. |
+| **SMART** | Self-Monitoring, Analysis and Reporting Technology, the drive's own health reporting. |
+| **HBA** | Host Bus Adapter, the controller card that connects the server to its drives. |
+| **DPC** | Deferred Procedure Call, a Windows kernel mechanism. A driver that holds a processor at DPC level too long can trigger a `DPC_WATCHDOG_VIOLATION` (`0x133`) bugcheck. |
+| **RDMA** | Remote Direct Memory Access, the low-latency network transport S2D uses between nodes. |
 
 - **Resiliency type**: how a volume keeps redundant data (mirror, parity, nested, or mirror-accelerated parity). The Azure Local default is three-way mirror on clusters of three or more nodes (three copies, survives two failures) and two-way mirror on two-node clusters; see What and Why for the full list.
 - **Fault domain**: a failure boundary, here a server (node). Copies of a block are placed in different fault domains.
@@ -249,15 +292,71 @@ If the pool has essentially no free reserve (for example above roughly 95 percen
 
 #### Step 4: Retire the failing drive  [MEDIUM RISK]
 
-```powershell
-# Marks the drive do-not-use and starts the evacuation/rebuild onto healthy drives.
-Set-PhysicalDisk -UniqueId <DiskUniqueId> -Usage Retired
+> [!WARNING]
+> **Do not run the retire command until all four of these are true.** They are
+> repeated here, rather than left in
+> [Before you retire](#before-you-retire-pre-checks-and-gotchas) alone, because this
+> is the first step that changes storage state and the usual cause of harm is running
+> it against the wrong drive or at the wrong time.
+>
+> 1. **Exactly one** suspect drive, in **one** fault domain (one node). Re-run the
+>    suspect sweep in [Before you retire](#before-you-retire-pre-checks-and-gotchas).
+>    If two or more drives are suspect, stop and engage Microsoft Support.
+> 2. No solution update, Cluster-Aware Updating (CAU) run, or node maintenance is in
+>    progress.
+> 3. The pool has enough free reserve on the **surviving** drives (Step 3).
+> 4. You have read the last-copy caveat immediately below.
 
-# Verify.
-Get-PhysicalDisk -UniqueId <DiskUniqueId> | Select-Object FriendlyName, Usage, OperationalStatus
+Caveat when the drive is a last-copy holder (Step 2 returned it under
+`-NoRedundancy`): retiring forces S2D to read those regions off the dying drive to
+rebuild them. Any region the drive can no longer read cannot be rebuilt and that data
+is lost. Retiring is still the correct action, because it triggers the evacuation
+while the drive is at least partly alive; leaving the drive in service guarantees the
+volume stays at No Redundancy. Retire sooner rather than later to maximize what can be
+salvaged. If `-NoRedundancy` returned this drive, confirm the backup position with the
+workload owner before you continue, and record that you did.
+
+**First, prove the `UniqueId` you are about to use really is the failing drive.**
+Retiring a healthy drive on an already-degraded pool is how this step causes data
+loss, and a copied or mistyped `UniqueId` is how that happens.
+
+```powershell
+$DiskUniqueId = '<DiskUniqueId>'   # the value you recorded in Step 2
+
+# Read the drive back and confirm it is the one you diagnosed, BEFORE changing anything.
+Get-PhysicalDisk -UniqueId $DiskUniqueId |
+    Select-Object FriendlyName, SerialNumber, HealthStatus,
+                  @{n='Op';e={$_.OperationalStatus -join ','}}, Usage, PhysicalLocation
 ```
 
-Caveat when the drive is a last-copy holder (Step 2 returned it under `-NoRedundancy`): retiring forces S2D to read those regions off the dying drive to rebuild them. Any region the drive can no longer read cannot be rebuilt and that data is lost. Retiring is still the correct action, because it triggers the evacuation while the drive is at least partly alive; leaving the drive in service guarantees the volume stays at No Redundancy. Retire sooner rather than later to maximize what can be salvaged.
+Confirm the output shows the **same serial number and the same node** you identified in
+Step 2, and that `Op` reads `Abnormal Latency` or `Lost Communication`. If any of that
+does not match, **stop and do not retire**. Re-run Step 2 to re-identify the drive. If it
+still does not match after a careful re-run, treat it as an unresolved identification
+problem rather than guessing: leave the pool as it is, collect the data in
+[Data to Collect Before Opening a Support Case](#data-to-collect-before-opening-a-support-case),
+and open a case with Microsoft Support. A degraded pool is recoverable; a healthy drive
+retired by mistake alongside an already-failing one may not be.
+
+```powershell
+# Marks the drive do-not-use and starts the evacuation/rebuild onto healthy drives.
+Set-PhysicalDisk -UniqueId $DiskUniqueId -Usage Retired
+
+# Verify.
+Get-PhysicalDisk -UniqueId $DiskUniqueId | Select-Object FriendlyName, Usage, OperationalStatus
+```
+
+> [!NOTE]
+> **A retire is reversible.** `Set-PhysicalDisk -UniqueId <DiskUniqueId> -Usage AutoSelect`
+> returns the drive to normal use and the pool rebalances. If you realize you retired
+> the wrong drive, set it straight back. Do **not** escalate to `Remove-PhysicalDisk`,
+> which is not reversible.
+>
+> Note the spelling: `Get-PhysicalDisk` **displays** the usage as `Auto-Select` with a
+> hyphen, but `Set-PhysicalDisk -Usage` takes the enum value `AutoSelect` with no
+> hyphen. Passing the hyphenated form fails with "Unable to match the identifier name
+> Auto-Select to a valid enumerator name". The valid values are `AutoSelect`,
+> `ManualSelect`, `HotSpare`, `Retired`, and `Journal`.
 
 #### Step 5: Monitor the rebuild
 
