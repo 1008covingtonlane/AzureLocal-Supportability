@@ -1,3 +1,23 @@
+<!-- tsg-metadata
+{
+  "schema": "azure-local-supportability/tsg-metadata/v1",
+  "document_type": "troubleshoot",
+  "products": ["Azure Local"],
+  "detector": {
+    "type": "command",
+    "signal": "Get-ChildItem"
+  },
+  "validation": {
+    "fidelity_level": "L3",
+    "technical_grade": null,
+    "reproduction_substrate": "either",
+    "automation_status": "ready",
+    "last_validated": "2026-08-18",
+    "spec_ref": "AzLocal_Storage_GhostCsvMountPoints"
+  }
+}
+-->
+
 # Troubleshoot ghost CSV mount points (`C:\ClusterStorage.000`, `.001`, `.00X`)
 
 <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse; margin-bottom:1em;">
@@ -221,7 +241,7 @@ numbered root anywhere in the message:
 ... C:\ClusterStorage.000\Infrastructure_1\...
 ```
 
-## Root cause
+## Contributing factors and evidence
 
 ### The namespace
 
@@ -249,8 +269,7 @@ on) and creates a fresh `C:\ClusterStorage`.
 This failure mode is what Microsoft's own guidance addresses. Microsoft documents that
 security, backup, and filter-driver products holding a handle on the CSV path cause access
 failures under `C:\ClusterStorage`, and publishes the exclusions that prevent them (see
-[Recommended antivirus exclusions for Hyper-V hosts](https://learn.microsoft.com/troubleshoot/windows-server/virtualization/antivirus-exclusions-for-hyper-v-hosts)
-and [Events 5120 and 5142 and unable to access the ClusterStorage folder](https://learn.microsoft.com/troubleshoot/windows-server/backup-and-storage/event-5120-5142-access-clusterstorage-folder)).
+[Recommended antivirus exclusions for Hyper-V hosts](https://learn.microsoft.com/troubleshoot/windows-server/virtualization/antivirus-exclusions-for-hyper-v-hosts)).
 Excluding `C:\ClusterStorage` from antivirus scanning on every node is the practical
 prevention for this condition. See [Prevention](#prevention).
 
@@ -460,7 +479,7 @@ Get-VM | Get-VMHardDiskDrive |
 > The command above reads only the **attached** disk path. If a VM has checkpoints or
 > differencing disks, the attached disk can sit on a healthy CSV while one of its
 > **parent** disks is still on a ghost root. That is the exact hazard described in
-> [Root cause](#why-a-referenced-ghost-path-is-dangerous-not-just-untidy), and it is
+> [Contributing factors and evidence](#why-a-referenced-ghost-path-is-dangerous-not-just-untidy), and it is
 > invisible to the command above. Deleting a ghost root that still holds a parent disk
 > breaks the chain and the child disk becomes unusable. Walk the parent chain too.
 
@@ -645,8 +664,9 @@ Combine the results and place the cluster in exactly one category.
 ### Steps
 
 1. **Paste the shared audit function.**
-   Every gate below calls this one function, so the final safety check is exactly as
-   strict as the Step 3 classification rather than a narrower subset of it. Paste it
+   Every gate below calls this one function, so the final safety check is as strict as
+   the Step 3 classification (references, reparse points, active CSV, platform working
+   data, and any query or remoting failure), not a narrower subset of it. Paste it
    once into your elevated session.
 
    ```powershell
@@ -758,12 +778,21 @@ Combine the results and place the cluster in exactly one category.
                }
 
                # A reparse point inside a ghost root means it still redirects to a volume.
+               # Platform working data in use (a .vhdx under MocArb\WorkingDirectory\, or an
+               # ImageStore folder) is a Path C blocker regardless of references; a bare or
+               # stale Infrastructure_1 breadcrumb is NOT working data and stays on Path A.
                try {
                    foreach ($g in (Get-ChildItem -Path 'C:\' -Directory -Filter 'ClusterStorage.*' -ErrorAction Stop |
                                    Where-Object { $_.Name -match '^ClusterStorage\.\d+$' })) {
                        foreach ($c in (Get-ChildItem -LiteralPath $g.FullName -Force -ErrorAction SilentlyContinue)) {
                            if ($c.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
                                $hits.Add("ReparsePoint: $($c.FullName)")
+                           }
+                       }
+                       foreach ($item in (Get-ChildItem -LiteralPath $g.FullName -Recurse -Force -ErrorAction SilentlyContinue)) {
+                           if (($item.FullName -match '(?i)MocArb[\\/]WorkingDirectory[\\/].+\.vhdx$') -or
+                               ($item.PSIsContainer -and $item.Name -eq 'ImageStore')) {
+                               $hits.Add("PlatformWorkingData: $($item.FullName)")
                            }
                        }
                    }
@@ -834,8 +863,9 @@ Combine the results and place the cluster in exactly one category.
    > the situation as
    > [Path C](#path-c-references-under-infrastructure_1-or-arb-engage-support).
 
-4. **Remove the ghost roots, one node at a time.**
-   This block re-runs the full audit, refuses to touch anything that is a reparse
+4. **Remove the ghost roots, one node at a time. [HIGH RISK]**
+   This permanently deletes the numbered roots. The block re-runs the full audit,
+   refuses to touch anything that is a reparse
    point, and requires you to type a confirmation. Run it on a single node, confirm
    the cluster is healthy, then move to the next.
 
@@ -944,7 +974,7 @@ which moves disks, configuration, checkpoints, and the smart paging file.
        throw "Set the VM name and CSV path variables before running this block."
    }
    if (-not (Get-VM -Name $VMName -ErrorAction SilentlyContinue)) {
-       throw "VM '$VMName' not found on $env:COMPUTERNAME."
+       throw "VM '$VMName' not found on $env:COMPUTERNAME. Get-VM and Move-VMStorage are node-local, so for a clustered VM you must run Path B from the node that currently owns it. Find the owner with 'Get-ClusterGroup | Where-Object GroupType -eq ''VirtualMachine''' (its OwnerNode column), move to that node, and re-run."
    }
 
    # The destination must be an ACTIVE CSV mount point from Step 1B, and it must be a
@@ -952,7 +982,10 @@ which moves disks, configuration, checkpoints, and the smart paging file.
    # infrastructure volume, so membership of that list is NOT on its own a safe test.
    $InfraPathPattern = '[\\/]Infrastructure(_\d+)?([\\/]|$)'
 
-   $allCsv   = @(Get-ClusterSharedVolume | ForEach-Object { $_.SharedVolumeInfo.FriendlyVolumeName })
+   # Only ONLINE CSVs are valid destinations. An Offline CSV still appears in this
+   # list but cannot host VM storage, so it is excluded here as well.
+   $allCsv   = @(Get-ClusterSharedVolume | Where-Object { $_.State -eq 'Online' } |
+                     ForEach-Object { $_.SharedVolumeInfo.FriendlyVolumeName })
    $validCsv = @($allCsv | Where-Object { $_ -notmatch $InfraPathPattern })
 
    # Checked FIRST so the reserved volume produces its own specific error rather than
@@ -1019,13 +1052,33 @@ which moves disks, configuration, checkpoints, and the smart paging file.
 
    if (-not $vhds) { Write-Host "No ghost-rooted disks on '$VMName'." }
    $vhds | ForEach-Object { "{0}  ->  {1}" -f $_.SourceFilePath, $_.DestinationFilePath }
+
+   # Move-VMStorage -Vhds relocates ATTACHED disks only. A ghost-rooted checkpoint or
+   # differencing PARENT is not an attached disk, so it will NOT move here; Step 5 and
+   # Path A will keep reporting it (correctly). Detect that case now so it is not a surprise.
+   $ghostParents = @(
+       Get-VM -Name $VMName | Get-VMHardDiskDrive | ForEach-Object {
+           $path = $_.Path; $depth = 0
+           while ($path -and $depth -lt 50) {
+               $vhd = Get-VHD -Path $path -ErrorAction SilentlyContinue
+               if (-not $vhd) { break }
+               $path = $vhd.ParentPath; $depth++
+               if ($path -and ($path -match $GhostPathPattern)) { $path }
+           }
+       }
+   )
+   if ($ghostParents.Count -gt 0) {
+       Write-Warning "PARENT disk(s) on a ghost root that Move-VMStorage will NOT relocate:"
+       $ghostParents | Sort-Object -Unique | ForEach-Object { Write-Warning "   $_" }
+       Write-Warning "Relocating an unattached differencing or checkpoint parent is not a hand procedure. Complete the attached-disk move if there is one, but this VM needs Path C (engage support) to clear the parent before Path A can remove the root."
+   }
    ```
 
    **Stop and read that mapping.** Every destination must be under the path you
    validated in step 1.
 
-4. **Dry-run the move, then perform it.**
-   `Move-VMStorage` supports `-WhatIf`. Always run the dry run and read its output
+4. **Dry-run the move, then perform it. [MEDIUM RISK]**
+   `Move-VMStorage` relocates live VM storage. It supports `-WhatIf`. Always run the dry run and read its output
    before the real move.
 
    The parameter set is built once, below. `-Vhds` is included **only** when there is
@@ -1061,13 +1114,34 @@ which moves disks, configuration, checkpoints, and the smart paging file.
 
    ```powershell
    $vm  = Get-VM -Name $VMName
-   $bad = @()
-   $bad += ($vm | Get-VMHardDiskDrive | Where-Object { $_.Path -match $GhostPathPattern }).Path
-   $bad += @($vm.ConfigurationLocation, $vm.SnapshotFileLocation, $vm.SmartPagingFilePath) |
-           Where-Object { $_ -and ($_ -match $GhostPathPattern) }
+   $bad = New-Object System.Collections.Generic.List[string]
 
-   if ($bad) { Write-Warning "Still referencing a ghost path:"; $bad }
-   else      { Write-Host "$VMName no longer references any ghost path." -ForegroundColor Green }
+   # Walk every attached disk's FULL parent chain, exactly as Step 2A does. Checking only
+   # attached paths would report success while a checkpoint or differencing PARENT is still
+   # on a ghost root, which Path A would then correctly refuse to delete, leaving a green
+   # verdict and a blocked cleanup. An UNREADABLE link is treated as a reference.
+   foreach ($d in ($vm | Get-VMHardDiskDrive)) {
+       $path  = $d.Path
+       $depth = 0
+       while ($path -and $depth -lt 50) {
+           if ($path -match $GhostPathPattern) { $bad.Add("disk chain (depth $depth): $path") }
+           $vhd = Get-VHD -Path $path -ErrorAction SilentlyContinue
+           if (-not $vhd) { $bad.Add("UNREADABLE (chain not fully walked): $path"); break }
+           $path = $vhd.ParentPath
+           $depth++
+       }
+   }
+   foreach ($p in @($vm.ConfigurationLocation, $vm.SnapshotFileLocation, $vm.SmartPagingFilePath)) {
+       if ($p -and ($p -match $GhostPathPattern)) { $bad.Add("config/checkpoint/paging: $p") }
+   }
+
+   if ($bad.Count -gt 0) {
+       Write-Warning "$VMName still references a ghost path (parent chains included):"
+       $bad
+   }
+   else {
+       Write-Host "$VMName no longer references any ghost path, including parent chains." -ForegroundColor Green
+   }
    ```
 
 6. **Repeat for every VM found in Step 2**, then re-run
@@ -1168,7 +1242,7 @@ Invoke-Command -ComputerName $nodes -ArgumentList $GhostPathPattern -ScriptBlock
         Node       = $env:COMPUTERNAME
         GhostRoots = (Get-ChildItem -Path 'C:\' -Directory -Filter 'ClusterStorage.*' -ErrorAction SilentlyContinue |
                       Where-Object { $_.Name -match '^ClusterStorage\.\d+$' }).Count
-        References = @($refs).Count
+        References = @($refs | Where-Object { $_ }).Count
     }
 } | Select-Object Node, GhostRoots, References | Format-Table -AutoSize
 
