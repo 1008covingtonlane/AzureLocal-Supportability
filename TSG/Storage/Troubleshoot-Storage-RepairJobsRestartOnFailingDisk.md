@@ -193,8 +193,8 @@ Get-VirtualDisk | Select-Object FriendlyName, HealthStatus, OperationalStatus, O
 # plus VirtualDisks.NoRedundancy / LastCopy on the volume.
 Get-HealthFault | Select-Object FaultType, PerceivedSeverity, Reason, FaultingObjectDescription
 
-# The failing drive: Healthy but "Abnormal Latency".
-Get-PhysicalDisk | Where-Object { ($_.OperationalStatus -join ',') -match 'Abnormal Latency' } |
+# The failing drive: Healthy but "Abnormal Latency" or "Lost Communication".
+Get-PhysicalDisk | Where-Object { ($_.OperationalStatus -join ',') -match 'Abnormal Latency|Lost Communication' } |
   Select-Object FriendlyName, SerialNumber, UniqueId, PhysicalLocation, HealthStatus, OperationalStatus
 
 # Corroborate with the reliability counters (read/write error totals, latency).
@@ -291,7 +291,7 @@ Only after the rebuild jobs reach zero and the volumes are Healthy:
 
 ```powershell
 # Turn on the location indicator (if supported) to find the drive in the chassis.
-Get-PhysicalDisk -UniqueId <DiskUniqueId> | Enable-PhysicalDiskIndication
+Get-PhysicalDisk -UniqueId <DiskUniqueId> | Enable-PhysicalDiskIdentification
 
 # Remove the retired drive from the pool, then physically swap it. Remove-PhysicalDisk has
 # no -UniqueId parameter, so resolve the disk object and pass it via -PhysicalDisks.
