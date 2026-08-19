@@ -446,6 +446,39 @@ Get-VM | Get-VMHardDiskDrive |
     Format-Table -AutoSize
 ```
 
+> [!IMPORTANT]
+> The command above reads only the **attached** disk path. If a VM has checkpoints or
+> differencing disks, the attached disk can sit on a healthy CSV while one of its
+> **parent** disks is still on a ghost root. That is the exact hazard described in
+> [Root cause](#why-a-referenced-ghost-path-is-dangerous-not-just-untidy), and it is
+> invisible to the command above. Deleting a ghost root that still holds a parent disk
+> breaks the chain and the child disk becomes unusable. Walk the parent chain too.
+
+```powershell
+# Walk every attached disk's FULL parent chain (checkpoints / differencing disks).
+Get-VM | Get-VMHardDiskDrive | ForEach-Object {
+    $vmName = $_.VMName
+    $path   = $_.Path
+    $depth  = 0
+    while ($path -and $depth -lt 50) {
+        if ($path -match $GhostPathPattern) {
+            [pscustomobject]@{ VMName = $vmName; Depth = $depth; Reference = $path }
+        }
+        $vhd = Get-VHD -Path $path -ErrorAction SilentlyContinue
+        if (-not $vhd) {
+            [pscustomobject]@{ VMName = $vmName; Depth = $depth; Reference = "UNREADABLE: $path" }
+            break
+        }
+        $path = $vhd.ParentPath
+        $depth++
+    }
+} | Format-Table -AutoSize
+```
+
+Any row returned is a reference and blocks cleanup. A row beginning `UNREADABLE:` means
+the chain could not be followed, so coverage is incomplete: treat it as a reference
+until you can read that disk.
+
 ### 2B. Virtual machine configuration, checkpoint, and paging paths
 
 A VM can have healthy disks and still be anchored to a ghost root by one of these
@@ -660,6 +693,25 @@ Combine the results and place the cluster in exactly one category.
                    foreach ($vm in (Get-VM -ErrorAction Stop)) {
                        foreach ($d in ($vm | Get-VMHardDiskDrive -ErrorAction SilentlyContinue)) {
                            if ($d.Path -match $Pattern) { $hits.Add("VMHardDisk: $($vm.Name) -> $($d.Path)") }
+
+                           # Walk the parent chain. A checkpoint / differencing PARENT can still
+                           # live on a ghost root while the attached child sits on a healthy CSV,
+                           # and deleting that parent breaks the chain. An unreadable link is
+                           # recorded as an error (a blocker), never skipped.
+                           $p = $d.Path
+                           $depth = 0
+                           while ($p -and $depth -lt 50) {
+                               $vhd = Get-VHD -Path $p -ErrorAction SilentlyContinue
+                               if (-not $vhd) {
+                                   if ($depth -gt 0) {
+                                       $errors.Add("Get-VHD could not read '$p' in the parent chain of $($vm.Name); coverage incomplete")
+                                   }
+                                   break
+                               }
+                               $p = $vhd.ParentPath
+                               if ($p -and ($p -match $Pattern)) { $hits.Add("VMDiskParent: $($vm.Name) -> $p") }
+                               $depth++
+                           }
                        }
                        foreach ($prop in 'ConfigurationLocation','SnapshotFileLocation','SmartPagingFilePath') {
                            $v = $vm.$prop
@@ -841,10 +893,24 @@ which moves disks, configuration, checkpoints, and the smart paging file.
        throw "VM '$VMName' not found on $env:COMPUTERNAME."
    }
 
-   # The destination must be an ACTIVE CSV mount point from Step 1B.
-   $validCsv = Get-ClusterSharedVolume | ForEach-Object { $_.SharedVolumeInfo.FriendlyVolumeName }
+   # The destination must be an ACTIVE CSV mount point from Step 1B, and it must be a
+   # CUSTOMER workload volume. Get-ClusterSharedVolume also returns the reserved
+   # infrastructure volume, so membership of that list is NOT on its own a safe test.
+   $InfraPathPattern = '[\\/]Infrastructure(_\d+)?([\\/]|$)'
+
+   $allCsv   = @(Get-ClusterSharedVolume | ForEach-Object { $_.SharedVolumeInfo.FriendlyVolumeName })
+   $validCsv = @($allCsv | Where-Object { $_ -notmatch $InfraPathPattern })
+
+   # Checked FIRST so the reserved volume produces its own specific error rather than
+   # a generic "not in the list" message.
+   if ($CsvRootPath -match $InfraPathPattern) {
+       throw "'$CsvRootPath' is the reserved Azure Local infrastructure volume. Customer workload storage must never be placed there. Pick a customer volume from Step 1B, or go to Path C."
+   }
+   if (-not $validCsv) {
+       throw "No customer CSV mount point is available on this cluster. Do not use the infrastructure volume. Go to Path C."
+   }
    if ($CsvRootPath -notin $validCsv) {
-       throw "'$CsvRootPath' is not an active CSV mount point. Valid values: $($validCsv -join ', ')"
+       throw "'$CsvRootPath' is not an active customer CSV mount point. Valid values: $($validCsv -join ', ')"
    }
    if ($CsvRootPath -match $GhostPathPattern) {
        throw "'$CsvRootPath' is itself a ghost path. Pick a canonical CSV from Step 1B."
@@ -908,35 +974,34 @@ which moves disks, configuration, checkpoints, and the smart paging file.
    `Move-VMStorage` supports `-WhatIf`. Always run the dry run and read its output
    before the real move.
 
-   > [!NOTE]
-   > If `$vhds` came back empty, because only the configuration, checkpoint, or
-   > paging paths were on a ghost root, **omit the `-Vhds` parameter entirely**.
-   > Passing an empty array makes `Move-VMStorage` reject the call.
+   The parameter set is built once, below. `-Vhds` is included **only** when there is
+   at least one ghost-rooted disk to move, because `Move-VMStorage` rejects an empty
+   array. Building it this way means you never have to hand-edit the command, which is
+   the step most likely to go wrong under time pressure.
 
    ```powershell
+   $moveParams = @{
+       Name                = $VMName
+       VirtualMachinePath  = $Destination
+       SnapshotFilePath    = $Destination
+       SmartPagingFilePath = $Destination
+   }
+   if ($vhds.Count -gt 0) { $moveParams['Vhds'] = $vhds }
+
    # Dry run: reports what would happen and changes nothing.
-   Move-VMStorage -Name $VMName `
-       -VirtualMachinePath  $Destination `
-       -SnapshotFilePath    $Destination `
-       -SmartPagingFilePath $Destination `
-       -Vhds                $vhds `
-       -WhatIf
+   Move-VMStorage @moveParams -WhatIf
    ```
 
-   When the dry run looks correct, run the same command without `-WhatIf`:
+   When the dry run looks correct, run the same parameter set without `-WhatIf`:
 
    ```powershell
-   Move-VMStorage -Name $VMName `
-       -VirtualMachinePath  $Destination `
-       -SnapshotFilePath    $Destination `
-       -SmartPagingFilePath $Destination `
-       -Vhds                $vhds
+   Move-VMStorage @moveParams
    ```
 
    > [!NOTE]
    > Supply only the parameters you actually need to change. If the VM's checkpoint
-   > location was already correct in Step 2B, omit `-SnapshotFilePath` rather than
-   > moving it unnecessarily.
+   > location was already correct in Step 2B, remove `SnapshotFilePath` from
+   > `$moveParams` rather than moving it unnecessarily.
 
 5. **Confirm this VM is clean.**
 
