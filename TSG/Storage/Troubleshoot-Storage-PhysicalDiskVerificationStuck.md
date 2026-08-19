@@ -156,14 +156,30 @@ $providers
 "Provider count: $(@($providers).Count)"
 ```
 
-Find this cluster's build so you can pick a valid comparison peer:
+Find this cluster's build so you can pick a valid comparison peer. **"Same build" means both the OS build and the Azure Local solution version**, because the provider set is shipped by the solution, not by the OS alone. Two clusters can report an identical `OsBuildNumber` and still ship different provider sets if their solution versions differ.
 
 ```powershell
-# Capture the OS build; also note the Azure Local solution version so the peer matches
+# 1. OS build
 Get-ComputerInfo -Property OsName, OsVersion, OsBuildNumber
+
+# 2. Azure Local solution / stamp version (this is the one that governs the provider set)
+Get-StampInformation | Select-Object StampVersion, OemVersion, DeploymentId
 ```
 
-Compare the provider count and values against a **healthy cluster of the same Azure Local build**. If this cluster reports fewer providers than that peer, the provider list is incomplete and is the likely cause of the stall. Record what you see for the remediation and for any support case.
+> [!NOTE]
+> If `Get-StampInformation` is unavailable on this build, read the solution version from the
+> Azure portal on the cluster resource, or from `Get-SolutionUpdateEnvironment` where present.
+> Do **not** proceed to Step B on an OS-build match alone.
+
+A valid comparison peer matches on **both** values above and is itself healthy. Compare the provider count and values against that peer. If this cluster reports fewer providers than the peer, the provider list is incomplete and is the likely cause of the stall. Record both versions and both provider lists for the remediation and for any support case.
+
+> [!IMPORTANT]
+> A matching provider **count** is a necessary check, not a sufficient one. The Step B gates
+> verify shape (count, uniqueness, GUID format, no placeholders); they cannot verify that the
+> GUIDs are the *correct* ones for this build. A full-count set captured from a wrong-build or
+> differently-configured peer will pass every gate and still be wrong. That is precisely why
+> the peer must match on both versions, and why Step B is capped at a single confirmed
+> restore before escalation.
 
 > [!NOTE]
 > The exact provider set is build specific (different builds ship different provider counts), so do not assume a fixed number and do not hard-code a list. The reliable check is a comparison against a healthy peer cluster on the **same build**. Each provider is a brace-wrapped GUID (for example `{00000000-0000-0000-0000-000000000000}`); when you capture a reference value, copy the **full** set exactly, without reformatting, wrapping, or dropping entries.
@@ -239,9 +255,13 @@ Preconditions (all must be true):
 First back up the current value on the affected cluster so you can roll back:
 
 ```powershell
-# Back up the current (incomplete) Providers value before changing anything
-$backupPath = 'C:\Temp\Health-Providers-backup.txt'
-New-Item -ItemType Directory -Path (Split-Path $backupPath) -Force | Out-Null
+# Back up the current (incomplete) Providers value before changing anything.
+# The filename is TIMESTAMPED on purpose. If you re-run Step B after a successful write,
+# the "current" value is the value you already wrote, so writing to one fixed filename
+# would silently overwrite your only copy of the original and destroy the rollback.
+$backupDir  = 'C:\Temp'
+$backupPath = Join-Path $backupDir ("Health-Providers-backup-{0}.txt" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
 $backup = (Get-ClusterResource -Name 'Health' | Get-ClusterParameter -Name Providers).Value
 $backup | Set-Content -Path $backupPath -ErrorAction Stop
 # Verify the backup actually wrote a rollback copy before continuing
@@ -249,6 +269,14 @@ if (-not (Test-Path $backupPath) -or @(Get-Content $backupPath).Count -lt @($bac
     throw "Backup to $backupPath failed or is incomplete. Do NOT continue without a verified rollback copy."
 }
 "Backed up $(@($backup).Count) provider(s) to $backupPath"
+Write-Host "ROLLBACK FILE: $backupPath" -ForegroundColor Yellow
+Write-Host "Write that path down. Rollback reads the FILE, not this PowerShell session." -ForegroundColor Yellow
+
+# Every backup taken on this node, oldest first. The OLDEST is the pre-change value.
+Get-ChildItem $backupDir -Filter 'Health-Providers-backup-*.txt' -ErrorAction SilentlyContinue |
+    Sort-Object CreationTime |
+    Select-Object Name, CreationTime, @{n='ProviderCount';e={ @(Get-Content $_.FullName | Where-Object { $_.Trim() }).Count }} |
+    Format-Table -AutoSize
 ```
 
 Capture the reference list from the healthy peer, then restore it on the affected cluster. Read the peer's provider **count** independently and record it below: completeness is proven by matching that recorded count, not by being larger than the broken cluster's set. The block hard-stops unless the pasted set matches the recorded peer count exactly, contains no placeholders, and every entry is a unique GUID, so a partial or placeholder list cannot be written:
@@ -294,7 +322,29 @@ $after = (Get-ClusterResource -Name 'Health' | Get-ClusterParameter -Name Provid
 
 Reinitialize so the restored providers take effect by **re-running the full guarded procedure in [Step A](#step-a-reinitialize-the-health-service-least-risk-try-first)** (its pre-move gate that confirms all nodes are Up and no storage job is running, its node-count-aware failover, and its post-move outcome check). Cluster state can change between steps, so do not use a shortened failover here.
 
-Wait a few minutes, then re-check `CanPool` as in Step A. If verification still does not complete, do not iterate further on the provider list; roll back to the backup (`Set-ClusterParameter -Name Providers -Value $backup`), collect diagnostics, and escalate.
+Wait a few minutes, then re-check `CanPool` as in Step A. If verification still does not complete, do not iterate further on the provider list: roll back and escalate.
+
+Roll back from the **backup file**, not from an in-session variable. The `$backup` variable only exists in the shell that created it, and a rollback is most often needed later, from a new session, or by a different engineer.
+
+```powershell
+# Pick the OLDEST backup on this node: it holds the value from before any change.
+$backupDir = 'C:\Temp'
+$oldest = Get-ChildItem $backupDir -Filter 'Health-Providers-backup-*.txt' -ErrorAction Stop |
+          Sort-Object CreationTime | Select-Object -First 1
+if (-not $oldest) { throw "No backup file found in $backupDir. Do NOT guess a provider list; escalate." }
+
+$restore = @(Get-Content $oldest.FullName | Where-Object { $_.Trim() })
+if (@($restore).Count -lt 1) { throw "Backup file $($oldest.FullName) is empty. Escalate rather than writing an empty provider list." }
+
+"Restoring $(@($restore).Count) provider(s) from $($oldest.FullName) (created $($oldest.CreationTime))"
+Get-ClusterResource -Name 'Health' | Set-ClusterParameter -Name Providers -Value $restore
+
+# Round-trip verify the rollback took
+$after = (Get-ClusterResource -Name 'Health' | Get-ClusterParameter -Name Providers).Value
+"Providers now: $(@($after).Count) (expected $(@($restore).Count))"
+```
+
+Then collect diagnostics and escalate.
 
 ### Step C: Claim the now-eligible disks
 
@@ -331,12 +381,24 @@ Add-PhysicalDisk -StoragePoolFriendlyName $pool.FriendlyName -PhysicalDisks $dis
 Then rebalance so existing data spreads onto the new disks:
 
 ```powershell
+# Gate: do not start a rebalance while another storage job is running. Add-PhysicalDisk
+# often kicks off its own repair/optimize job, and stacking a rebalance on top of it is
+# what makes this step I/O punishing on a production cluster.
+$jobs = @(Get-StorageJob | Where-Object { $_.JobState -notin @('Completed','Failed') })
+if ($jobs.Count -gt 0) {
+    $jobs | Select-Object Name, JobState, PercentComplete | Format-Table -AutoSize
+    throw "Refusing to rebalance: $($jobs.Count) storage job(s) still running. Wait for Get-StorageJob to drain, then re-run."
+}
+
 # Rebalance the pool onto the new disks
 Optimize-StoragePool -FriendlyName $pool.FriendlyName
+
+# Watch it: this runs in the background and can take hours on a full pool.
+Get-StorageJob | Select-Object Name, JobState, PercentComplete | Format-Table -AutoSize
 ```
 
 > [!NOTE]
-> `Optimize-StoragePool` starts a pool rebalance that runs in the background and can be I/O intensive and long running on a full pool. Confirm no other storage job is running first (`Get-StorageJob`), monitor progress with `Get-StorageJob`, and prefer off-peak hours. It is safe to defer: the new capacity is already usable once the disks are added.
+> `Optimize-StoragePool` starts a pool rebalance that runs in the background and can be I/O intensive and long running on a full pool. The gate above refuses to start while another storage job is in flight; still prefer off-peak hours. It is safe to defer entirely: the new capacity is already usable once the disks are added.
 
 ### Step D: Verify the fix
 
