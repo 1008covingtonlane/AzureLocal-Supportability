@@ -31,6 +31,16 @@ Azure Arc **cluster connect** provides a secure way to connect to Arc-enabled Ku
 
 - **What the check does:** on each node it issues an outbound HTTPS request to the cluster-connect relay endpoint for the cluster's region, `azgnrelay-<region>-l1.servicebus.windows.net` (for example `azgnrelay-eastus-l1.servicebus.windows.net`), on TCP port **443**. Reaching the endpoint is a success **even if the endpoint replies `403`** - the check is proving *reachability*, not authentication, so any HTTP response from the real endpoint (commonly `200` or `403`) passes.
 - **Severity:** the check is defined at **Warning** severity in the Azure public cloud, so a failure does **not** block a solution update, but the Arc cluster-connect feature is broken until it is fixed. In Azure Government (Fairfax) the same check is **Critical**.
+
+> [!IMPORTANT]
+> **Azure Government uses a different endpoint suffix.** Every relay FQDN on this page is the
+> Azure **public cloud** form `azgnrelay-<region>-l1.servicebus.windows.net`. In Azure
+> Government the Service Bus / Relay suffix is **`servicebus.usgovcloudapi.net`**, so the host
+> to test and allow is `azgnrelay-<usgov-region>-l1.servicebus.usgovcloudapi.net` (for example
+> the `usgovvirginia` or `usgovarizona` region). Testing or allow-listing the commercial name
+> on a Fairfax cluster will not fix the check, and because the check is **Critical** there it
+> also blocks the solution update. Confirm the exact host for your cloud and region from the
+> `TargetResourceID` in the check's own `Detail` output rather than from an example.
 - **When it runs:** the Connectivity validator runs during **Deployment**, **Update**, **Scale-out (Add Node)**, and **Upgrade** readiness, and can also be run standalone at any time (see step 1).
 - **The failure is always the same class of problem:** the node's outbound connection to the relay endpoint did not complete. The `Detail` string tells you *where* it broke (DNS, TCP/firewall, proxy, or TLS inspection); step 2 maps each signature to its fix.
 
@@ -214,7 +224,10 @@ Match the `Detail` signature from step 2 to the sub-mode and apply **only** the 
 > A cluster node's DNS configuration is also how it finds Active Directory, the cluster
 > name, and its own management endpoints. Pointing a node at a public resolver such as
 > `8.8.8.8` to make this one lookup succeed will break domain and cluster name
-> resolution. **Never set a node's DNS to a public resolver.** The correct fix is to make
+> resolution. **Never point a node at a public resolver, whether by replacing its DNS servers
+> or by adding one to the list.** An added public resolver still gets used for lookups and
+> still breaks Active Directory and cluster name resolution intermittently, which is harder to
+> diagnose than an outright break. The correct fix is to make
 > the customer's existing DNS servers resolve the public name, normally by fixing their
 > forwarders.
 
@@ -273,7 +286,15 @@ Invoke-SolutionUpdatePrecheck -SystemHealth
 Get-SolutionUpdateEnvironment | Format-List HealthState, HealthCheckDate
 ```
 
-Confirm `HealthState` is `Success` with a current `HealthCheckDate`. You can also re-run `Invoke-AzStackHciConnectivityValidation` on an affected node and confirm the **Cluster connect** target now reports `Overall Result: True`.
+Confirm `HealthState` is `Success` with a current `HealthCheckDate`.
+
+> [!NOTE]
+> `HealthState` is the **aggregate** result of the whole pre-update health check, not this one
+> target. An unrelated failing check keeps it non-`Success` even after cluster connect is
+> fixed, and a `Success` does not on its own prove that this target passed. The authoritative
+> per-target confirmation is the validator output itself, so always also re-run
+> `Invoke-AzStackHciConnectivityValidation` on an affected node and confirm the **Cluster
+> connect** target reports `Overall Result: True`.
 
 **Quick lower-layer check (DNS and firewall/TCP sub-modes only).** For sub-modes 1 and 2, `Test-NetConnection` confirms the DNS/TCP layer is now open:
 
@@ -293,4 +314,12 @@ Every node should return `True` (substitute the cluster's region). Note that `Tr
 - **Azure Relay / Service Bus relay (`*.servicebus.windows.net`):** the Azure service that hosts the cluster-connect reverse tunnel. The per-region endpoint is `azgnrelay-<region>-l1.servicebus.windows.net`.
 - **`Invoke-AzStackHciConnectivityValidation`:** the Environment Checker connectivity validator. It probes each required endpoint and reports the result, including this "Cluster connect" target. Run it standalone on a node or workstation to reproduce and verify.
 - **`Test Analysis - Layer 3 (tnc)`:** the `Test-NetConnection` (TCP 443) result recorded in the `Detail`. `True` = TCP reached the endpoint (a remaining failure is proxy or TLS inspection); `False` = TCP or DNS failed (firewall or DNS).
+  > **Note on the label.** The validator prints "Layer 3", but `Test-NetConnection -Port 443`
+  > completes a **TCP** handshake, which is layer 4. Read the field as "did name resolution
+  > plus a direct TCP connection succeed", not as an IP-layer test. It is also **not**
+  > proxy-aware: `Test-NetConnection` connects directly, while the validator's HTTPS request
+  > honors the node's proxy. On a network where direct 443 is blocked and all traffic must go
+  > through a proxy, `tnc` can therefore read `False` even though the proxy path is the only
+  > supported route, so treat `tnc: False` plus a configured proxy as the proxy sub-mode, not
+  > automatically as a firewall problem.
 - **AKS enabled by Azure Arc:** Azure Kubernetes Service running on Azure Local, managed through Azure Arc. Cluster connect is one of the paths used to reach it.
