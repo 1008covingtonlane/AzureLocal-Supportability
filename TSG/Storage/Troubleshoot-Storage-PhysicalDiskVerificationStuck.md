@@ -260,7 +260,11 @@ First back up the current value on the affected cluster so you can roll back:
 # the "current" value is the value you already wrote, so writing to one fixed filename
 # would silently overwrite your only copy of the original and destroy the rollback.
 $backupDir  = 'C:\Temp'
-$backupPath = Join-Path $backupDir ("Health-Providers-backup-{0}.txt" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+# The filename carries the CLUSTER NAME as well as the timestamp. A lab node or a re-used
+# jump box can hold backups from a different cluster or an older incident, and restoring one
+# of those cluster-wide would be worse than the original fault.
+$clusterName = (Get-Cluster).Name
+$backupPath = Join-Path $backupDir ("Health-Providers-backup-{0}-{1}.txt" -f $clusterName, (Get-Date -Format 'yyyyMMdd-HHmmss'))
 New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
 $backup = (Get-ClusterResource -Name 'Health' | Get-ClusterParameter -Name Providers).Value
 $backup | Set-Content -Path $backupPath -ErrorAction Stop
@@ -272,8 +276,8 @@ if (-not (Test-Path $backupPath) -or @(Get-Content $backupPath).Count -lt @($bac
 Write-Host "ROLLBACK FILE: $backupPath" -ForegroundColor Yellow
 Write-Host "Write that path down. Rollback reads the FILE, not this PowerShell session." -ForegroundColor Yellow
 
-# Every backup taken on this node, oldest first. The OLDEST is the pre-change value.
-Get-ChildItem $backupDir -Filter 'Health-Providers-backup-*.txt' -ErrorAction SilentlyContinue |
+# Every backup for THIS cluster on this node, oldest first. The OLDEST is the pre-change value.
+Get-ChildItem $backupDir -Filter ("Health-Providers-backup-{0}-*.txt" -f $clusterName) -ErrorAction SilentlyContinue |
     Sort-Object CreationTime |
     Select-Object Name, CreationTime, @{n='ProviderCount';e={ @(Get-Content $_.FullName | Where-Object { $_.Trim() }).Count }} |
     Format-Table -AutoSize
@@ -327,21 +331,40 @@ Wait a few minutes, then re-check `CanPool` as in Step A. If verification still 
 Roll back from the **backup file**, not from an in-session variable. The `$backup` variable only exists in the shell that created it, and a rollback is most often needed later, from a new session, or by a different engineer.
 
 ```powershell
-# Pick the OLDEST backup on this node: it holds the value from before any change.
-$backupDir = 'C:\Temp'
-$oldest = Get-ChildItem $backupDir -Filter 'Health-Providers-backup-*.txt' -ErrorAction Stop |
-          Sort-Object CreationTime | Select-Object -First 1
-if (-not $oldest) { throw "No backup file found in $backupDir. Do NOT guess a provider list; escalate." }
+# Pick the OLDEST backup FOR THIS CLUSTER: it holds the value from before any change.
+# Scoping by cluster name matters: a re-used node can hold another cluster's backup, and
+# restoring that cluster-wide would be worse than the fault you are fixing.
+$backupDir   = 'C:\Temp'
+$clusterName = (Get-Cluster).Name
+$candidates  = @(Get-ChildItem $backupDir -Filter ("Health-Providers-backup-{0}-*.txt" -f $clusterName) -ErrorAction SilentlyContinue |
+                 Sort-Object CreationTime)
+if (-not $candidates) { throw "No backup file for cluster '$clusterName' in $backupDir. Do NOT guess a provider list; escalate." }
 
-$restore = @(Get-Content $oldest.FullName | Where-Object { $_.Trim() })
+$oldest = $candidates[0]
+"Backups for '$clusterName' (oldest first):"
+$candidates | Select-Object Name, CreationTime | Format-Table -AutoSize
+"Using: $($oldest.FullName) (created $($oldest.CreationTime))"
+
+$guidPattern = '^\{[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\}$'
+$restore = @(Get-Content $oldest.FullName | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 if (@($restore).Count -lt 1) { throw "Backup file $($oldest.FullName) is empty. Escalate rather than writing an empty provider list." }
+if (@($restore | Where-Object { $_ -notmatch $guidPattern }).Count -gt 0) {
+    throw "Backup file $($oldest.FullName) contains a non-GUID line. Do NOT write it; escalate."
+}
 
-"Restoring $(@($restore).Count) provider(s) from $($oldest.FullName) (created $($oldest.CreationTime))"
+"Restoring $(@($restore).Count) provider(s)"
 Get-ClusterResource -Name 'Health' | Set-ClusterParameter -Name Providers -Value $restore
 
-# Round-trip verify the rollback took
-$after = (Get-ClusterResource -Name 'Health' | Get-ClusterParameter -Name Providers).Value
-"Providers now: $(@($after).Count) (expected $(@($restore).Count))"
+# Round-trip verify by GUID IDENTITY, not just by count. A same-count but different set, or a
+# multi-value write that collapsed into a single string, would both pass a count-only check.
+$after = @((Get-ClusterResource -Name 'Health' | Get-ClusterParameter -Name Providers).Value |
+           ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+$missing = @(Compare-Object -ReferenceObject $restore -DifferenceObject $after)
+if ($after.Count -ne $restore.Count -or $missing.Count -gt 0) {
+    $missing | Format-Table -AutoSize
+    throw "Rollback did NOT round-trip: wrote $($restore.Count) provider(s), read back $($after.Count) with $($missing.Count) difference(s). Escalate."
+}
+"Rollback verified: $($after.Count) provider(s) match the backup exactly."
 ```
 
 Then collect diagnostics and escalate.
