@@ -222,8 +222,9 @@ Invoke-Command -ComputerName $nodes -ArgumentList $GhostPathPattern -ScriptBlock
 - New numbered folders appear after every solution update, or after a node restart.
 - **Several numbered folders have accumulated over many months**, one per update,
   each holding only a small `Infrastructure_1` breadcrumb of a few hundred bytes.
-  This is the most common shape in the field, and on its own it is benign; the
-  checks below are what tell you whether it is still benign on your cluster.
+  This is the most common shape in the field, and on its own it is not an active
+  fault, but an `Infrastructure_1` folder is reserved platform storage; the checks
+  below tell you whether the root is clear and where to route it.
 - A solution update fails part-way through, and the failure references a path
   containing a numbered root.
 - An Arc Resource Bridge VM fails to start, or ARB redeployment fails, after an
@@ -583,18 +584,17 @@ Get-ChildItem -Path 'C:\' -Directory -Filter 'ClusterStorage.*' -ErrorAction Sil
 >   ARB or MOC working data such as a `.vhdx` under `MocArb\WorkingDirectory\` or
 >   an `ImageStore` folder, is platform data in use. Go to
 >   [Path C](#path-c-references-under-infrastructure_1-or-arb-engage-support).
-> - Small, stale breadcrumb content left behind by past orchestration, for example
->   a few files under
->   `Infrastructure_1\Shares\SU1_Infrastructure_1\Orchestration\AgentLifecycleManagement\FCARotation\SuccessFiles`,
->   with **no** references from Step 2, is an ordinary leftover. It stays on the
->   normal path and is handled by
->   [Path A](#path-a-no-references-found-safe-to-clean-up).
+> - An `Infrastructure_1` folder is **reserved Azure Local system storage**, even
+>   when it holds only a small, stale breadcrumb left behind by past orchestration
+>   (for example a few files under
+>   `Infrastructure_1\Shares\SU1_Infrastructure_1\Orchestration\AgentLifecycleManagement\FCARotation\SuccessFiles`).
+>   Do not remove it by hand. Go to
+>   [Path C](#path-c-references-under-infrastructure_1-or-arb-engage-support).
 >
-> The presence of an `Infrastructure_1` folder inside a ghost root is expected and
-> is **not** on its own a reason to open a support case. A cluster that has taken
-> several updates commonly accumulates one such folder per numbered root, each only
-> a few hundred bytes. Treating every one of those as a support case creates noise
-> and trains people to ignore the check.
+> This matches the companion CSSTools remediation, which also refuses to delete a
+> ghost root that still contains an `Infrastructure_1` folder and routes it to
+> support. The Path A audit enforces the same rule, so a paste-and-run operator is
+> protected even without reading this note.
 
 ### 2E. Optional: search logs and configuration for stale references
 
@@ -642,9 +642,9 @@ Combine the results and place the cluster in exactly one category.
 
 | Classification | Criteria (all must hold) | Action |
 | --- | --- | --- |
-| **Safe to clean up** | Ghost roots exist; 2A, 2B, 2C and the SMB check return nothing on **every** node; 1C shows `IsReparsePoint = False` everywhere; 2D shows the roots are empty or contain only stale files with no references | [Path A](#path-a-no-references-found-safe-to-clean-up) |
+| **Safe to clean up** | Ghost roots exist; 2A, 2B, 2C and the SMB check return nothing on **every** node; 1C shows `IsReparsePoint = False` everywhere; 2D shows the roots are empty or contain only ordinary leftover files with no references and **no** `Infrastructure_N` folder or ARB/MOC platform content | [Path A](#path-a-no-references-found-safe-to-clean-up) |
 | **Unsafe, active references found** | Any of 2A, 2B, 2C returns a row, or an SMB open file exists under a ghost path, and the referencing object is a **customer workload VM** | [Path B](#path-b-a-workload-vm-references-a-ghost-path) |
-| **Unsafe, platform references found** | Any reference from 2A, 2B or 2C points under `Infrastructure_1`, or the ghost root holds ARB / MOC working data (a `.vhdx` under `MocArb\WorkingDirectory\`, an `ImageStore` folder), or 1C shows `IsReparsePoint = True`, or an active CSV is mounted under a numbered root | [Path C](#path-c-references-under-infrastructure_1-or-arb-engage-support) |
+| **Unsafe, platform references found** | Any reference from 2A, 2B or 2C points under `Infrastructure_1`, or the ghost root holds ARB / MOC working data (a `.vhdx` under `MocArb\WorkingDirectory\`, an `ImageStore` folder) or an `Infrastructure_N` folder, or 1C shows `IsReparsePoint = True`, or an active CSV is mounted under a numbered root | [Path C](#path-c-references-under-infrastructure_1-or-arb-engage-support) |
 
 > [!WARNING]
 > If you are unsure which category applies, treat it as **Path C** and engage
@@ -778,9 +778,10 @@ Combine the results and place the cluster in exactly one category.
                }
 
                # A reparse point inside a ghost root means it still redirects to a volume.
-               # Platform working data in use (a .vhdx under MocArb\WorkingDirectory\, or an
-               # ImageStore folder) is a Path C blocker regardless of references; a bare or
-               # stale Infrastructure_1 breadcrumb is NOT working data and stays on Path A.
+               # Platform content is a Path C blocker regardless of references: an
+               # Infrastructure_N folder (reserved system storage), a .vhdx under
+               # MocArb\WorkingDirectory\, or an ImageStore folder. This matches the
+               # companion CSSTools remediation, which refuses the same content.
                try {
                    foreach ($g in (Get-ChildItem -Path 'C:\' -Directory -Filter 'ClusterStorage.*' -ErrorAction Stop |
                                    Where-Object { $_.Name -match '^ClusterStorage\.\d+$' })) {
@@ -790,9 +791,10 @@ Combine the results and place the cluster in exactly one category.
                            }
                        }
                        foreach ($item in (Get-ChildItem -LiteralPath $g.FullName -Recurse -Force -ErrorAction SilentlyContinue)) {
-                           if (($item.FullName -match '(?i)MocArb[\\/]WorkingDirectory[\\/].+\.vhdx$') -or
+                           if (($item.PSIsContainer -and $item.Name -match '^Infrastructure_\d+$') -or
+                               ($item.FullName -match '(?i)MocArb[\\/]WorkingDirectory[\\/].+\.vhdx$') -or
                                ($item.PSIsContainer -and $item.Name -eq 'ImageStore')) {
-                               $hits.Add("PlatformWorkingData: $($item.FullName)")
+                               $hits.Add("PlatformContent: $($item.FullName)")
                            }
                        }
                    }
@@ -1156,6 +1158,8 @@ which moves disks, configuration, checkpoints, and the smart paging file.
 Stop and open a support case if **any** of the following is true:
 
 - A reference from Step 2 points under `...\Infrastructure_1\...`.
+- A ghost root **contains an `Infrastructure_1` folder** (reserved system storage),
+  even if nothing references it.
 - A ghost root holds ARB or MOC working data, for example a `.vhdx` under
   `MocArb\WorkingDirectory\` or an `ImageStore` folder.
 - [Step 1C](#1c-check-whether-the-ghost-root-still-redirects-to-live-data) shows
@@ -1163,10 +1167,10 @@ Stop and open a support case if **any** of the following is true:
 - An **active** CSV reports a `FriendlyVolumeName` under a numbered root.
 
 > [!NOTE]
-> An `Infrastructure_1` folder inside a ghost root is **not** by itself one of
-> these conditions. Clusters routinely accumulate a small, stale `Infrastructure_1`
-> breadcrumb per numbered root as updates run. What matters is whether anything
-> still references it, or whether it holds real ARB or MOC working data.
+> An `Infrastructure_1` folder is a Path C condition on its own, even when nothing
+> references it and it holds only a small, stale breadcrumb. It is reserved Azure
+> Local system storage, so it is routed to support rather than removed by hand. The
+> companion CSSTools remediation applies the same rule.
 
 These are platform-managed paths. `Infrastructure_1` is reserved for Azure Local
 system configuration, the platform deliberately blocks customer storage placement on
