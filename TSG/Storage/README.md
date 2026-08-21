@@ -4,3 +4,4 @@
 * [How To: Add physical disks to an existing Azure Local cluster](./HowTo-Storage-AddPhysicalDisksToS2DPool.md)
 * [Troubleshoot: Physical disks not claimed after insertion (`CanPool=False`)](./Troubleshoot-Storage-PhysicalDiskCanPoolFalse.md)
 * [Troubleshoot: Storage pool capacity threshold warning (fixed vs thin volumes)](./Troubleshoot-Storage-StoragePoolCapacityThreshold.md)
+* [Troubleshoot: Ghost CSV mount points (`C:\ClusterStorage.000`, `.001`, `.00X`)](./Troubleshoot-Storage-GhostCsvMountPoints.md)
