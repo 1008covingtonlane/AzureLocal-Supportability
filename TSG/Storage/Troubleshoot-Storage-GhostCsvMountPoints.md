@@ -99,9 +99,14 @@ on depend on these words.
 | **Mount point** | A folder that is really a doorway into a whole disk volume. Opening it shows that volume's contents. Deleting it can affect real data. |
 | **Junction / reparse point** | The Windows mechanism behind a mount point: a folder that redirects somewhere else. A `-Recurse` delete can follow one into live data. |
 | **Open handle** | A file or folder currently held open by a running program. Windows will not let you rename or move something while a handle is open on it. |
-| **SMB** | The Windows file-sharing protocol. `Get-SmbOpenFile` shows which files other machines currently have open. |
+| **SMB** | The Windows file-sharing protocol. `Get-SmbOpenFile` shows which files **other machines** currently have open over SMB. It does NOT show handles held by software running locally on the node, such as antivirus, backup, or a filter driver, which is the kind of handle that creates a ghost root in the first place. See [2G](#2g-open-handles-on-a-ghost-path). |
+| **Fan-out** | Running one command against every cluster node at once, with `Invoke-Command -ComputerName`, instead of logging on to each node. |
+| **Canonical** | The correct, expected location: `C:\ClusterStorage\<CsvName>`. A ghost path is the same content reached through a numbered root instead. |
+| **Parent chain / differencing disk** | A checkpoint creates a small child disk that points at a larger parent disk. The child is unusable without its parent, so the whole chain matters, not just the disk attached to the VM. |
+| **VHD-Set (`.vhds`) / `.vhdpmem`** | Other virtual disk formats: a shared disk usable by several VMs, and a persistent-memory disk. Both are live data, exactly like `.vhdx`. |
+| **Solution update** | The Azure Local platform update that moves the whole cluster to a new version. Not the same as Windows Update. Ghost roots typically appear during one. |
 | **ARB** (Arc Resource Bridge) | An Azure Local platform component that runs as a VM on the cluster. Managed by the platform, not by you. |
-| **MOC / MocArb** | The platform layer underneath ARB. Its working files live on the infrastructure volume. Platform-managed, not customer-managed. |
+| **MOC / MocArb** | Microsoft On-premises Cloud, the platform layer underneath ARB. Its working files live on the infrastructure volume. Platform-managed, not customer-managed. |
 | **`Infrastructure_1`** | The reserved Azure Local infrastructure volume. It holds platform configuration and working data, is not for customer workloads, and the platform blocks you from placing storage on it. |
 
 ## Before you start
@@ -119,15 +124,42 @@ on depend on these words.
 Confirm all of that before going further:
 
 ```powershell
-# Every value below must be True before you continue.
+# Every value below must be True before you continue. This block STOPS if any is False,
+# rather than printing a table a reader can walk past: a preflight that only prints is not
+# a gate, and every later step assumes all four already hold.
 $id = [Security.Principal.WindowsIdentity]::GetCurrent()
-[pscustomobject]@{
+$preflight = [ordered]@{
     RunningAsAdmin        = ([Security.Principal.WindowsPrincipal]$id).IsInRole(
                                 [Security.Principal.WindowsBuiltInRole]::Administrator)
     FailoverClustersAvail = [bool](Get-Module -ListAvailable FailoverClusters)
     HyperVAvail           = [bool](Get-Module -ListAvailable Hyper-V)
     ClusterReachable      = [bool](Get-Cluster -ErrorAction SilentlyContinue)
-} | Format-List
+}
+
+# Remoting is a stated prerequisite, so TEST it rather than assuming it. The cluster-wide
+# checks all use Invoke-Command, and a remoting failure part-way through Step 2 looks like
+# a clean result on the nodes that did not answer.
+$remotingOk = $true
+try {
+    $peers = @((Get-ClusterNode -ErrorAction Stop | Where-Object State -eq 'Up').Name)
+    if ($peers.Count) {
+        $reached = @(Invoke-Command -ComputerName $peers -ScriptBlock { $env:COMPUTERNAME } -ErrorAction SilentlyContinue)
+        $remotingOk = ($reached.Count -eq $peers.Count)
+        if (-not $remotingOk) {
+            Write-Warning ("Remoting reached {0} of {1} node(s). Unreachable: {2}" -f $reached.Count, $peers.Count,
+                (@($peers | Where-Object { ($_ -split '\.')[0] -notin @($reached | ForEach-Object { ($_ -split '\.')[0] }) }) -join ', '))
+        }
+    }
+}
+catch { $remotingOk = $false; Write-Warning "Could not enumerate cluster nodes: $($_.Exception.Message)" }
+$preflight['RemotingToAllUpNodes'] = $remotingOk
+
+[pscustomobject]$preflight | Format-List
+$failed = @($preflight.GetEnumerator() | Where-Object { -not $_.Value } | Select-Object -ExpandProperty Key)
+if ($failed.Count) {
+    throw "Preflight failed: $($failed -join ', '). Resolve these before running any step in this guide."
+}
+'Preflight passed.'
 ```
 
 ### Safety rules
@@ -171,7 +203,7 @@ Invoke-Command -ComputerName $nodes -ArgumentList $GhostPathPattern -ScriptBlock
 
     $findings = New-Object System.Collections.Generic.List[string]
 
-    $ghostRoots = Get-ChildItem -Path 'C:\' -Directory -Filter 'ClusterStorage.*' -ErrorAction SilentlyContinue |
+    $ghostRoots = Get-ChildItem -Path "$($env:SystemDrive)\" -Directory -Filter 'ClusterStorage.*' -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -match '^ClusterStorage\.\d+$' } |
         Select-Object -ExpandProperty FullName
 
@@ -347,7 +379,7 @@ is.
 ### 1A. List the numbered roots
 
 ```powershell
-Get-ChildItem -Path 'C:\' -Directory -Filter 'ClusterStorage.*' -ErrorAction SilentlyContinue |
+Get-ChildItem -Path "$($env:SystemDrive)\" -Directory -Filter 'ClusterStorage.*' -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -match '^ClusterStorage\.\d+$' } |
     Select-Object FullName, CreationTime, LastWriteTime |
     Sort-Object CreationTime
@@ -408,12 +440,38 @@ Check the **`ReparsePoint` file attribute**, which is the authoritative signal.
 > Path A, and the cleanup would then be deleting live storage.
 
 ```powershell
-Get-ChildItem -Path 'C:\' -Directory -Filter 'ClusterStorage.*' -ErrorAction SilentlyContinue |
+Get-ChildItem -Path "$($env:SystemDrive)\" -Directory -Filter 'ClusterStorage.*' -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -match '^ClusterStorage\.\d+$' } |
     ForEach-Object {
         $root = $_.FullName
-        $children = Get-ChildItem -LiteralPath $root -Force -Recurse -ErrorAction SilentlyContinue
-        if (-not $children) {
+
+        # Test the ROOT ITSELF first. Only the children were checked before, so a numbered
+        # root that is ITSELF a volume mount point reported IsReparsePoint = False and
+        # classified as safe, which is the worst possible miss: the whole root is live storage.
+        $rootIsReparse = [bool]($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+        [pscustomobject]@{
+            GhostRoot      = $root
+            Child          = '<the root itself>'
+            IsReparsePoint = $rootIsReparse
+            Detail         = if ($rootIsReparse) { (fsutil reparsepoint query "$root" 2>&1 | Out-String).Trim() } else { '' }
+        }
+
+        # An enumeration that FAILED is not an empty root. Reading errors explicitly so an
+        # access-denied subtree cannot hide a nested reparse point behind an empty result.
+        $enumErrors = @()
+        $children = Get-ChildItem -LiteralPath $root -Force -Recurse -ErrorAction SilentlyContinue -ErrorVariable +enumErrors
+        if ($enumErrors.Count) {
+            [pscustomobject]@{
+                GhostRoot      = $root
+                Child          = '<ENUMERATION INCOMPLETE>'
+                IsReparsePoint = $null
+                Detail         = "$($enumErrors.Count) path(s) could not be read; treat this root as UNVERIFIED, not clean."
+            }
+        }
+        # elseif, NOT a separate if: a root whose enumeration FAILED must not also emit the
+        # '<empty>' row, because the results table calls empty the lowest-risk outcome and an
+        # incomplete scan would then read as both unverified and safe at the same time.
+        elseif (-not $children) {
             [pscustomobject]@{ GhostRoot = $root; Child = '<empty>'; IsReparsePoint = $false; Detail = '' }
         }
         else {
@@ -439,7 +497,7 @@ Get-ChildItem -Path 'C:\' -Directory -Filter 'ClusterStorage.*' -ErrorAction Sil
 | --- | --- |
 | `Child = <empty>` | Empty shell. Lowest risk. |
 | `IsReparsePoint = False` with files present | Ordinary leftover files. Inventory them in [Step 2D](#2d-inventory-what-is-actually-inside). |
-| `IsReparsePoint = True` on any child | The ghost root **still redirects to a volume**. Treat it as live storage. Do not delete. Go to [Path C](#path-c-references-under-infrastructure_1-or-arb-engage-support). |
+| `IsReparsePoint = True` on the root itself or any child | The ghost root **still redirects to a volume**. Treat it as live storage. Do not delete. Go to [Path C](#path-c-references-under-infrastructure_1-or-arb-engage-support). |
 
 ## Step 2: prove whether anything references them
 
@@ -457,7 +515,20 @@ Define the pattern once in every session where you run these:
 
 ```powershell
 $GhostPathPattern = '[\\/]ClusterStorage\.\d+([\\/]|$)'
+
+# Safety guard. PowerShell -match against an EMPTY or unset variable matches EVERY path,
+# so a step run without this pattern set reports every VM on the node as referencing a
+# ghost root. Fail loudly here instead of silently reporting a false positive on all of them.
+if ([string]::IsNullOrWhiteSpace($GhostPathPattern)) {
+    throw 'GhostPathPattern is not set. Re-run this block before running any step below.'
+}
 ```
+
+> [!WARNING]
+> Every step in this section depends on `$GhostPathPattern`. If you open a **new**
+> PowerShell session, reconnect, or paste a single step on its own, re-run the block
+> above first. Each paste-ready block below re-defines the pattern if it is missing, but
+> only for the session it runs in.
 
 > [!NOTE]
 > Use this exact pattern. A simpler filter such as `ClusterStorage.` also matches the
@@ -469,6 +540,9 @@ $GhostPathPattern = '[\\/]ClusterStorage\.\d+([\\/]|$)'
 ### 2A. Virtual machine disk paths
 
 ```powershell
+# Self-sufficient: re-defines the pattern if this block is pasted into a fresh session.
+# Without it, -match against an unset variable matches EVERY path.
+if ([string]::IsNullOrWhiteSpace($GhostPathPattern)) { $GhostPathPattern = '[\\/]ClusterStorage\.\d+([\\/]|$)' }
 Get-VM | Get-VMHardDiskDrive |
     Where-Object { $_.Path -match $GhostPathPattern } |
     Select-Object VMName, ControllerType, ControllerNumber, ControllerLocation, Path |
@@ -484,6 +558,9 @@ Get-VM | Get-VMHardDiskDrive |
 > breaks the chain and the child disk becomes unusable. Walk the parent chain too.
 
 ```powershell
+# Self-sufficient: re-defines the pattern if this block is pasted into a fresh session.
+# Without it, -match against an unset variable matches EVERY path.
+if ([string]::IsNullOrWhiteSpace($GhostPathPattern)) { $GhostPathPattern = '[\\/]ClusterStorage\.\d+([\\/]|$)' }
 # Walk every attached disk's FULL parent chain (checkpoints / differencing disks).
 Get-VM | Get-VMHardDiskDrive | ForEach-Object {
     $vmName = $_.VMName
@@ -508,12 +585,33 @@ Any row returned is a reference and blocks cleanup. A row beginning `UNREADABLE:
 the chain could not be followed, so coverage is incomplete: treat it as a reference
 until you can read that disk.
 
+A hard disk is not the only file a VM can hold on a ghost root. An **ISO mounted in a
+virtual DVD drive** is a live reference too, and deleting it breaks the VM's optical media
+(and can block a VM that boots or installs from it).
+
+```powershell
+# Self-sufficient: re-defines the pattern if this block is pasted into a fresh session.
+# Without it, -match against an unset variable matches EVERY path.
+if ([string]::IsNullOrWhiteSpace($GhostPathPattern)) { $GhostPathPattern = '[\\/]ClusterStorage\.\d+([\\/]|$)' }
+
+Get-VM | Get-VMDvdDrive |
+    Where-Object { $_.Path -match $GhostPathPattern } |
+    Select-Object VMName, ControllerNumber, ControllerLocation, Path |
+    Format-Table -AutoSize
+```
+
+Treat any row here exactly like a 2A row: it is a reference, and the root is not safe to
+delete.
+
 ### 2B. Virtual machine configuration, checkpoint, and paging paths
 
 A VM can have healthy disks and still be anchored to a ghost root by one of these
 three properties.
 
 ```powershell
+# Self-sufficient: re-defines the pattern if this block is pasted into a fresh session.
+# Without it, -match against an unset variable matches EVERY path.
+if ([string]::IsNullOrWhiteSpace($GhostPathPattern)) { $GhostPathPattern = '[\\/]ClusterStorage\.\d+([\\/]|$)' }
 Get-VM | Select-Object Name, ConfigurationLocation, SnapshotFileLocation, SmartPagingFilePath |
     Where-Object {
         $_.ConfigurationLocation -match $GhostPathPattern -or
@@ -529,12 +627,18 @@ roles, platform-managed resources, and anything that is not a Hyper-V VM on the 
 you happen to be sitting on. Run it **once** from any node.
 
 ```powershell
+# Self-sufficient: re-defines the pattern if this block is pasted into a fresh session.
+# Without it, -match against an unset variable matches EVERY path.
+if ([string]::IsNullOrWhiteSpace($GhostPathPattern)) { $GhostPathPattern = '[\\/]ClusterStorage\.\d+([\\/]|$)' }
 $paramErrors = New-Object System.Collections.Generic.List[string]
 Get-ClusterResource | ForEach-Object {
     $r = $_
     try {
         Get-ClusterParameter -InputObject $r -ErrorAction Stop | ForEach-Object {
-            if (($_.Value -is [string]) -and ($_.Value -match $GhostPathPattern)) {
+            # Match strings AND string arrays: a multi-valued parameter holding a ghost path
+            # was skipped entirely by a bare -is [string] test.
+            if (($_.Value -is [string] -or $_.Value -is [string[]]) -and
+                (@($_.Value) -match $GhostPathPattern)) {
                 [pscustomobject]@{ Resource = $r.Name; Parameter = $_.Name; Value = $_.Value }
             }
         }
@@ -548,7 +652,7 @@ Get-ClusterResource | ForEach-Object {
 } | Sort-Object Resource, Parameter | Format-Table -AutoSize
 
 if ($paramErrors.Count) {
-    Write-Warning ("{0} cluster resource(s) did not return parameters and were not inspected: {1}" -f `
+    Write-Warning ("VERIFICATION INCOMPLETE: {0} cluster resource(s) did not return parameters and were NOT inspected: {1}. Uninspected coverage is not clean coverage, and Get-GhostCsvAudit fails closed on exactly this condition, so resolve these and re-run before calling the issue resolved." -f `
         $paramErrors.Count, ($paramErrors -join ', '))
 }
 ```
@@ -558,7 +662,7 @@ if ($paramErrors.Count) {
 If the ghost roots are empty, that alone is strong evidence nothing is using them.
 
 ```powershell
-Get-ChildItem -Path 'C:\' -Directory -Filter 'ClusterStorage.*' -ErrorAction SilentlyContinue |
+Get-ChildItem -Path "$($env:SystemDrive)\" -Directory -Filter 'ClusterStorage.*' -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -match '^ClusterStorage\.\d+$' } |
     ForEach-Object {
         $root = $_.FullName
@@ -607,8 +711,8 @@ $SearchRoots = @('C:\CloudDeployment\Logs', 'C:\MASLogs', 'C:\Windows\Cluster')
 foreach ($root in $SearchRoots) {
     if (Test-Path -LiteralPath $root) {
         Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Length -lt 200MB } |
-            Select-String -Pattern 'ClusterStorage\.\d+' -List -ErrorAction SilentlyContinue |
+            Where-Object { if ($_.Length -ge 200MB) { Write-Warning "SKIPPED (over 200MB, search it manually): $($_.FullName)"; $false } else { $true } } |
+            Select-String -Pattern 'ClusterStorage\.\d+' -ErrorAction SilentlyContinue |
             Select-Object -First 50 @{N='File';E={$_.Path}}, @{N='Match';E={$_.Matches[0].Value}}
     }
 }
@@ -621,30 +725,114 @@ foreach ($root in $SearchRoots) {
 ### 2F. Optional: establish when the ghost root appeared
 
 ```powershell
-# Generates cluster logs covering the last 3 days into the current folder.
-Get-ClusterLog -Destination . -TimeSpan 4320
+# Generates cluster logs covering the last 3 days into a DEDICATED folder, not the current
+# directory: an elevated shell starts in System32, and $env:TEMP mixes in unrelated logs.
+$logDir = Join-Path $env:TEMP ("GhostCsvClusterLogs-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+Get-ClusterLog -Destination $logDir -TimeSpan 4320
 
-Select-String -Path .\*.log -Pattern 'ClusterStorage\.\d+' |
+Select-String -Path (Join-Path $logDir '*.log') -Pattern 'ClusterStorage\.\d+' |
     Select-Object -First 40 Filename, LineNumber, Line
 ```
 
 Correlate the timestamps with your update and restart history. That tells you which
 operation created the ghost root, which is what you need to stop it recurring.
 
+> [!WARNING]
+> Use the cluster log for this, not the folder's `CreationTime`. A ghost root is produced by
+> RENAMING the existing CSV root, and an NTFS rename PRESERVES `CreationTime`, so the ghost
+> root's `CreationTime` is when the original `C:\ClusterStorage` was first created, not when
+> it was ghosted. The `CreationTime` column shown in Step 1A is useful for telling several
+> ghost roots apart, not for dating the incident.
+
 > [!NOTE]
 > Search for the numbered path itself, as above. Do not search for a specific
 > sentence of cluster-log text: the exact wording is not a documented, stable string,
 > so a phrase search can return nothing on a cluster that genuinely has the problem.
 
+### 2G. Open handles on a ghost path
+
+Step 3 requires this check, and it is the one that most directly matches the cause: a
+ghost root exists because something held a handle open on the CSV root. Run it on
+**every** node.
+
+Two different things are being looked for, and neither alone is sufficient:
+
+- **Remote SMB opens** (`Get-SmbOpenFile`). Another machine holding a file open.
+- **Local handles.** Antivirus, a backup agent, or a filter driver running ON the node.
+  `Get-SmbOpenFile` cannot see these, and this is the handle class that creates the ghost
+  root in the first place, so a clean SMB result is not a clean handle result.
+
+```powershell
+# Self-sufficient: re-defines the pattern if this block is pasted into a fresh session.
+# Without it, -match against an unset variable matches EVERY path.
+if ([string]::IsNullOrWhiteSpace($GhostPathPattern)) { $GhostPathPattern = '[\\/]ClusterStorage\.\d+([\\/]|$)' }
+
+$nodes = (Get-ClusterNode | Where-Object State -eq 'Up').Name
+Invoke-Command -ComputerName $nodes -ArgumentList $GhostPathPattern -ScriptBlock {
+    param($Pattern)
+    $hits   = New-Object System.Collections.Generic.List[string]
+    $errors = New-Object System.Collections.Generic.List[string]
+
+    # Remote SMB opens. TERMINATING: a failed query must not read as "no open files".
+    try {
+        foreach ($f in (Get-SmbOpenFile -ErrorAction Stop)) {
+            if ($f.Path -match $Pattern) { $hits.Add("SMB open: $($f.Path) (by $($f.ClientUserName) from $($f.ClientComputerName))") }
+        }
+    }
+    catch { $errors.Add("Get-SmbOpenFile failed -> $($_.Exception.Message)") }
+
+    # Local handles. There is no built-in cmdlet for this, so report what CAN be
+    # established and be explicit that the check is partial rather than implying it is clean.
+    $sysRoot = "$($env:SystemDrive)\"
+    $roots = @(Get-ChildItem -Path $sysRoot -Directory -Filter 'ClusterStorage.*' -ErrorAction SilentlyContinue |
+               Where-Object { $_.Name -match '^ClusterStorage\.\d+$' })
+    foreach ($r in $roots) {
+        try {
+            # A rename that the OS refuses is direct evidence of an open handle, but it is a
+            # MUTATION, so it is not attempted here. Instead, report the root as
+            # handle-unverified so the operator uses handle.exe or Process Explorer.
+            $errors.Add("LOCAL HANDLES NOT PROVEN for $($r.FullName): run 'handle.exe -a -u $($r.FullName)' (Sysinternals) or Process Explorer's Find Handle on this node.")
+        }
+        catch { $errors.Add("Local handle probe failed for $($r.FullName) -> $($_.Exception.Message)") }
+    }
+
+    [pscustomobject]@{
+        Node          = $env:COMPUTERNAME
+        SmbHits       = @($hits)
+        SmbHitCount   = $hits.Count
+        Notes         = @($errors)
+    }
+} | Select-Object Node, SmbHitCount, SmbHits, Notes | Format-List
+```
+
+> [!IMPORTANT]
+> A zero `SmbHitCount` means no REMOTE opens. It does not prove no local handle exists.
+> Before Path A, confirm on each node with `handle.exe -a -u C:\ClusterStorage.00X` from
+> [Sysinternals](https://learn.microsoft.com/sysinternals/downloads/handle), or Process
+> Explorer's Find Handle. If a local handle is found, identify and stop the owning process
+> (commonly antivirus or a backup agent) and re-run Step 2. Do not delete a root whose
+> handle state is unknown.
+
 ## Step 3: classify what you found
 
-Combine the results and place the cluster in exactly one category.
+Classify **each ghost root separately**, then act on the most severe classification present.
 
-| Classification | Criteria (all must hold) | Action |
+A node can hold an empty `C:\ClusterStorage.000` and a referenced `C:\ClusterStorage.001`
+at the same time. Those are two different answers on one node, and forcing a single verdict
+would let the safe root's answer justify deleting the referenced one. Path A's cleanup is
+cluster-wide and only proceeds when NO root anywhere is referenced, so if any root lands in
+Path B or Path C, resolve that first and re-run Steps 1 to 3 before any cleanup.
+
+Evaluate the rows **in the order listed**: Path C first, then Path B, then Path A. A root can
+satisfy more than one row, and the most severe match wins.
+
+| Classification | Criteria (all must hold, per root) | Action |
 | --- | --- | --- |
-| **Safe to clean up** | Ghost roots exist; 2A, 2B, 2C and the SMB check return nothing on **every** node; 1C shows `IsReparsePoint = False` everywhere; 2D shows the roots are empty or contain only stale files with no references | [Path A](#path-a-no-references-found-safe-to-clean-up) |
-| **Unsafe, active references found** | Any of 2A, 2B, 2C returns a row, or an SMB open file exists under a ghost path, and the referencing object is a **customer workload VM** | [Path B](#path-b-a-workload-vm-references-a-ghost-path) |
+| **Safe to clean up** | Ghost roots exist; 2A, 2B, 2C and 2G return nothing on **every** node, and every node actually ANSWERED (a node that was skipped, unreachable, or whose scan reported `<ENUMERATION INCOMPLETE>` is UNVERIFIED, which blocks Path A); 1C shows `IsReparsePoint = False` everywhere; 2D shows the roots are empty or contain only stale files with no references | [Path A](#path-a-no-references-found-safe-to-clean-up) |
+| **Unsafe, active references found** | Any of 2A, 2B, 2C returns a row, or 2G shows an open handle under a ghost path, and the referencing object is a **customer workload VM** | [Path B](#path-b-a-workload-vm-references-a-ghost-path) |
 | **Unsafe, platform references found** | Any reference from 2A, 2B or 2C points under `Infrastructure_1`, or the ghost root holds ARB / MOC working data (any virtual hard disk, or a `MocArb`, `ImageStore`, or `WorkingDirectory` folder), or 1C shows `IsReparsePoint = True`, or an active CSV is mounted under a numbered root | [Path C](#path-c-references-under-infrastructure_1-or-arb-engage-support) |
+| **Unsafe, reference is not a VM** | Any 2C cluster-resource parameter or 2G open handle references a ghost path and the owner is NOT a Hyper-V VM (a file share, a generic service or script resource, or an unidentified process) | [Path C](#path-c-references-under-infrastructure_1-or-arb-engage-support): there is no self-service repoint for these |
 
 > [!WARNING]
 > If you are unsure which category applies, treat it as **Path C** and engage
@@ -656,7 +844,7 @@ Combine the results and place the cluster in exactly one category.
 ### Prerequisites
 
 - Steps 1, 2 and 3 completed **in order**, on **every** node, with no findings.
-- Step 1C shows `IsReparsePoint = False` for every child of every ghost root.
+- Step 1C shows `IsReparsePoint = False` for every ghost root ITSELF and for every child of it.
 - If the ghost roots contain any files at all, you have either copied them somewhere
   safe or confirmed with the data owner that they are disposable. An inventory export
   is a record, not a backup.
@@ -734,6 +922,10 @@ Combine the results and place the cluster in exactly one category.
 
                try {
                    foreach ($vm in (Get-VM -ErrorAction Stop)) {
+                       # A mounted ISO is a live reference just like a disk.
+                       foreach ($dvd in ($vm | Get-VMDvdDrive -ErrorAction Stop)) {
+                           if ($dvd.Path -match $pattern) { $hits.Add("VMDvdDrive: $($vm.Name) -> $($dvd.Path)") }
+                       }
                        foreach ($d in ($vm | Get-VMHardDiskDrive -ErrorAction SilentlyContinue)) {
                            if ($d.Path -match $Pattern) { $hits.Add("VMHardDisk: $($vm.Name) -> $($d.Path)") }
 
@@ -782,8 +974,13 @@ Combine the results and place the cluster in exactly one category.
                # check only immediate children. A read that cannot complete throws and is
                # recorded as a blocker below, so an unreadable root is never reported safe.
                try {
-                   foreach ($g in (Get-ChildItem -Path 'C:\' -Directory -Filter 'ClusterStorage.*' -ErrorAction Stop |
+                   foreach ($g in (Get-ChildItem -Path "$($env:SystemDrive)\" -Directory -Filter 'ClusterStorage.*' -ErrorAction Stop |
                                    Where-Object { $_.Name -match '^ClusterStorage\.\d+$' })) {
+                       # The ROOT ITSELF can be the mount point. Scanning only descendants let a
+                       # numbered root that IS a volume mount point pass this gate entirely.
+                       if ($g.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                           $hits.Add("ReparsePointOnRoot: $($g.FullName)")
+                       }
                        foreach ($item in (Get-ChildItem -LiteralPath $g.FullName -Recurse -Force -ErrorAction Stop)) {
                            if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
                                $hits.Add("ReparsePoint: $($item.FullName)")
@@ -849,7 +1046,7 @@ Combine the results and place the cluster in exactly one category.
    $backup = "C:\Temp\GhostCsvBackup-$stamp"
    New-Item -ItemType Directory -Path $backup -Force | Out-Null
 
-   Get-ChildItem -Path 'C:\' -Directory -Filter 'ClusterStorage.*' -ErrorAction SilentlyContinue |
+   Get-ChildItem -Path "$($env:SystemDrive)\" -Directory -Filter 'ClusterStorage.*' -ErrorAction SilentlyContinue |
        Where-Object { $_.Name -match '^ClusterStorage\.\d+$' } |
        ForEach-Object {
            Get-ChildItem -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue |
@@ -879,7 +1076,7 @@ Combine the results and place the cluster in exactly one category.
        $audit.Blockers
    }
    else {
-       $targets = Get-ChildItem -Path 'C:\' -Directory -Filter 'ClusterStorage.*' -ErrorAction SilentlyContinue |
+       $targets = Get-ChildItem -Path "$($env:SystemDrive)\" -Directory -Filter 'ClusterStorage.*' -ErrorAction SilentlyContinue |
            Where-Object { $_.Name -match '^ClusterStorage\.\d+$' }
 
        # Never recurse into a reparse point: that can delete the target volume's data.
@@ -890,6 +1087,8 @@ Combine the results and place the cluster in exactly one category.
        $scanError = $null
        foreach ($t in $targets) {
            try {
+               # The root itself first: deleting a root that IS a mount point deletes into live storage.
+               if ($t.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { $unsafe += $t }
                $unsafe += Get-ChildItem -LiteralPath $t.FullName -Force -Recurse -ErrorAction Stop |
                    Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReparsePoint }
            }
@@ -919,17 +1118,33 @@ Combine the results and place the cluster in exactly one category.
                foreach ($t in $targets) {
                    # Re-check this specific root immediately before removing it, so a reparse
                    # point created between the scan above and this moment cannot be followed.
-                   $lateCheck = @(Get-ChildItem -LiteralPath $t.FullName -Force -Recurse -ErrorAction Stop |
-                       Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReparsePoint })
+                   $lateCheck = @(
+                       @($t | Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReparsePoint }) +
+                       @(Get-ChildItem -LiteralPath $t.FullName -Force -Recurse -ErrorAction Stop |
+                         Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReparsePoint })
+                   )
                    if ($lateCheck.Count -gt 0) {
                        Write-Warning "Skipping $($t.FullName): a reparse point appeared since the scan."
                        continue
                    }
-                   # [System.IO.Directory]::Delete removes a reparse point as a LINK rather than
-                   # following it into the target, which Remove-Item -Recurse does not guarantee
-                   # on Windows PowerShell 5.1.
-                   [System.IO.Directory]::Delete($t.FullName, $true)
-                   Write-Host "Removed $($t.FullName)"
+                   # [System.IO.Directory]::Delete removes a reparse point as a LINK rather
+                   # than following it into the target. It does NOT clear the read-only
+                   # attribute, so clear it first: otherwise the call throws part-way and
+                   # leaves the root partially deleted.
+                   try {
+                       Get-ChildItem -LiteralPath $t.FullName -Force -Recurse -ErrorAction Stop |
+                           Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReadOnly } |
+                           ForEach-Object { $_.Attributes = $_.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly) }
+                       [System.IO.Directory]::Delete($t.FullName, $true)
+                       Write-Host "Removed $($t.FullName)"
+                   }
+                   catch {
+                       # Stop the whole batch on the first failure. Continuing would leave some
+                       # roots deleted and one half-deleted with no record of where it stopped.
+                       Write-Warning "FAILED to remove $($t.FullName): $($_.Exception.Message)"
+                       Write-Warning "Stopping. $($t.FullName) may be PARTIALLY deleted. Re-run Get-GhostCsvAudit before touching any remaining root."
+                       break
+                   }
                }
            }
            else {
@@ -980,6 +1195,52 @@ which moves disks, configuration, checkpoints, and the smart paging file.
        throw "VM '$VMName' not found on $env:COMPUTERNAME. Get-VM and Move-VMStorage are node-local, so for a clustered VM you must run Path B from the node that currently owns it. Find the owner with 'Get-ClusterGroup | Where-Object GroupType -eq ''VirtualMachine''' (its OwnerNode column), move to that node, and re-run."
    }
 
+   # Get-VM -Name accepts WILDCARDS, so a pasted value such as 'web*' or a partial name can
+   # match several VMs and silently feed all of them into the move. Require exactly one, and
+   # require the name to be literal.
+   if ($VMName -match '[\*\?\[\]]') {
+       throw "VMName '$VMName' contains a wildcard character. Supply one exact VM name; Path B moves storage and must never act on a set."
+   }
+   $matchedVms = @(Get-VM -Name $VMName -ErrorAction SilentlyContinue)
+   if ($matchedVms.Count -ne 1) {
+       throw "VMName '$VMName' matched $($matchedVms.Count) VM(s): $(($matchedVms.Name) -join ', '). Supply one exact VM name."
+   }
+
+   # Path C content must never be repointed by the customer. The classification in Step 3
+   # covers the ghost ROOT, but nothing here previously checked the VM ITSELF, so an ARB or
+   # platform VM name copied out of Step 2A would be moved onto a customer CSV.
+   $platformVmPattern = '^(AzureStackHCI|ARB-|arcbridge|.*-arcbridge|moc-|.*_MocArb.*|ClusterPerformanceHistory)'
+   if ($matchedVms[0].Name -match $platformVmPattern) {
+       throw "VM '$VMName' looks like an Azure Local platform or Arc Resource Bridge VM. That is Path C: stop and engage Microsoft Support rather than repointing it yourself."
+   }
+   # The infrastructure test must cover EVERY storage location, not just attached disks: a
+   # config, checkpoint, or paging path under Infrastructure_<n> is equally Path C.
+   $infraHits = @()
+   $infraHits += @($matchedVms[0] | Get-VMHardDiskDrive -ErrorAction SilentlyContinue |
+                   Where-Object { $_.Path -match '[\\/]Infrastructure(_\d+)?[\\/]' } |
+                   Select-Object -ExpandProperty Path)
+   $infraHits += @($matchedVms[0].ConfigurationLocation, $matchedVms[0].SnapshotFileLocation,
+                   $matchedVms[0].SmartPagingFilePath) |
+                 Where-Object { $_ -and ($_ -match '[\\/]Infrastructure(_\d+)?[\\/]') }
+   if ($infraHits.Count) {
+       throw "VM '$VMName' has storage on the reserved infrastructure volume ($($infraHits -join '; ')). That is Path C: stop and engage Microsoft Support."
+   }
+
+   # A disk attached to MORE THAN ONE VM (a shared .vhdx or a VHD Set) must never be moved
+   # here: Move-VMStorage relocates the file, and the peer VM's path would still point at the
+   # old location, breaking a VM this guide was never asked to touch.
+   $myDiskPaths = @($matchedVms[0] | Get-VMHardDiskDrive -ErrorAction SilentlyContinue |
+                    Select-Object -ExpandProperty Path)
+   $sharedWith = @()
+   foreach ($other in (Get-VM -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $matchedVms[0].Name })) {
+       foreach ($od in ($other | Get-VMHardDiskDrive -ErrorAction SilentlyContinue)) {
+           if ($od.Path -and ($myDiskPaths -contains $od.Path)) { $sharedWith += "$($other.Name) -> $($od.Path)" }
+       }
+   }
+   if ($sharedWith.Count) {
+       throw "One or more disks on '$VMName' are ALSO attached to another VM ($($sharedWith -join '; ')). Moving shared storage would break the other VM. That is Path C: stop and engage Microsoft Support."
+   }
+
    # The destination must be an ACTIVE CSV mount point from Step 1B, and it must be a
    # CUSTOMER workload volume. Get-ClusterSharedVolume also returns the reserved
    # infrastructure volume, so membership of that list is NOT on its own a safe test.
@@ -999,6 +1260,10 @@ which moves disks, configuration, checkpoints, and the smart paging file.
    if (-not $validCsv) {
        throw "No customer CSV mount point is available on this cluster. Do not use the infrastructure volume. Go to Path C."
    }
+   # Normalise before comparing: a pasted path with a trailing slash would not match the
+   # Get-ClusterSharedVolume value and would block a legitimate destination.
+   $CsvRootPath = $CsvRootPath.TrimEnd('\','/')
+   $validCsv    = @($validCsv | ForEach-Object { $_.TrimEnd('\','/') })
    if ($CsvRootPath -notin $validCsv) {
        throw "'$CsvRootPath' is not an active customer CSV mount point. Valid values: $($validCsv -join ', ')"
    }
@@ -1025,6 +1290,9 @@ which moves disks, configuration, checkpoints, and the smart paging file.
 3. **Build the disk mapping and review it.**
 
    ```powershell
+   # Self-sufficient: re-defines the pattern if this block is pasted into a fresh session.
+   # Without it, -match against an unset variable matches EVERY path.
+   if ([string]::IsNullOrWhiteSpace($GhostPathPattern)) { $GhostPathPattern = '[\\/]ClusterStorage\.\d+([\\/]|$)' }
    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
 
    # The [string] casts are REQUIRED, and are the most common reason this step
@@ -1116,6 +1384,9 @@ which moves disks, configuration, checkpoints, and the smart paging file.
 5. **Confirm this VM is clean.**
 
    ```powershell
+   # Self-sufficient: re-defines the pattern if this block is pasted into a fresh session.
+   # Without it, -match against an unset variable matches EVERY path.
+   if ([string]::IsNullOrWhiteSpace($GhostPathPattern)) { $GhostPathPattern = '[\\/]ClusterStorage\.\d+([\\/]|$)' }
    $vm  = Get-VM -Name $VMName
    $bad = New-Object System.Collections.Generic.List[string]
 
@@ -1163,7 +1434,7 @@ Stop and open a support case if **any** of the following is true:
   `.vhdx`, `.avhd`, `.avhdx`, `.vhds`, `.vhdpmem`), or a `MocArb`, `ImageStore`, or
   `WorkingDirectory` folder.
 - [Step 1C](#1c-check-whether-the-ghost-root-still-redirects-to-live-data) shows
-  `IsReparsePoint = True` for any child of a ghost root.
+  `IsReparsePoint = True` for the root itself or any child of a ghost root.
 - An **active** CSV reports a `FriendlyVolumeName` under a numbered root.
 
 > [!NOTE]
@@ -1189,17 +1460,69 @@ Get-ClusterSharedVolume | ForEach-Object {
     [pscustomobject]@{ CSVName = $_.Name; Path = $_.SharedVolumeInfo.FriendlyVolumeName; State = $_.State }
 } | Export-Csv "$out\csv-mountpoints.csv" -NoTypeInformation
 
-Get-ChildItem -Path 'C:\' -Directory -Filter 'ClusterStorage.*' -ErrorAction SilentlyContinue |
+Get-ChildItem -Path "$($env:SystemDrive)\" -Directory -Filter 'ClusterStorage.*' -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -match '^ClusterStorage\.\d+$' } |
-    Select-Object FullName, CreationTime, LastWriteTime |
+    Select-Object FullName, CreationTime, LastWriteTime,
+        @{n='IsReparsePoint';e={[bool]($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint)}} |
     Export-Csv "$out\ghost-roots.csv" -NoTypeInformation
+
+# The criteria that TRIGGER Path C are the reference and reparse findings, so export those
+# too. Sending only the CSV list and cluster parameters makes support re-run Steps 1 and 2
+# before they can start, which is the slowest possible opening to a case.
+$nodes = (Get-ClusterNode | Where-Object State -eq 'Up').Name
+Invoke-Command -ComputerName $nodes -ArgumentList $GhostPathPattern -ScriptBlock {
+    param($Pattern)
+    $refs = New-Object System.Collections.Generic.List[object]
+    foreach ($vm in (Get-VM -ErrorAction SilentlyContinue)) {
+        foreach ($d in ($vm | Get-VMHardDiskDrive -ErrorAction SilentlyContinue)) {
+            $path = $d.Path; $depth = 0
+            while ($path -and $depth -lt 50) {
+                if ($path -match $Pattern) { $refs.Add([pscustomobject]@{ Node=$env:COMPUTERNAME; Kind='VMDiskChain'; Object=$vm.Name; Value=$path; Depth=$depth }) }
+                if (-not (Test-Path -LiteralPath $path)) { break }
+                $vhd = Get-VHD -Path $path -ErrorAction SilentlyContinue
+                if (-not $vhd) { $refs.Add([pscustomobject]@{ Node=$env:COMPUTERNAME; Kind='UnreadableChain'; Object=$vm.Name; Value=$path; Depth=$depth }); break }
+                $path = $vhd.ParentPath; $depth++
+            }
+        }
+        foreach ($dvd in ($vm | Get-VMDvdDrive -ErrorAction SilentlyContinue)) {
+            if ($dvd.Path -and ($dvd.Path -match $Pattern)) { $refs.Add([pscustomobject]@{ Node=$env:COMPUTERNAME; Kind='VMDvdDrive'; Object=$vm.Name; Value=$dvd.Path; Depth=0 }) }
+        }
+        foreach ($prop in 'ConfigurationLocation','SnapshotFileLocation','SmartPagingFilePath') {
+            $v = $vm.$prop
+            if ($v -and ($v -match $Pattern)) { $refs.Add([pscustomobject]@{ Node=$env:COMPUTERNAME; Kind="VMConfig:$prop"; Object=$vm.Name; Value=$v; Depth=0 }) }
+        }
+    }
+    foreach ($f in (Get-SmbOpenFile -ErrorAction SilentlyContinue)) {
+        if ($f.Path -match $Pattern) { $refs.Add([pscustomobject]@{ Node=$env:COMPUTERNAME; Kind='SmbOpenFile'; Object=$f.ClientComputerName; Value=$f.Path; Depth=0 }) }
+    }
+    # Root and descendant reparse points, plus platform content, per ghost root.
+    foreach ($g in (Get-ChildItem -Path "$($env:SystemDrive)\" -Directory -Filter 'ClusterStorage.*' -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -match '^ClusterStorage\.\d+$' })) {
+        if ($g.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            $refs.Add([pscustomobject]@{ Node=$env:COMPUTERNAME; Kind='ReparsePointOnRoot'; Object=$g.FullName; Value=$g.FullName; Depth=0 })
+        }
+        foreach ($item in (Get-ChildItem -LiteralPath $g.FullName -Force -Recurse -ErrorAction SilentlyContinue)) {
+            if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                $refs.Add([pscustomobject]@{ Node=$env:COMPUTERNAME; Kind='ReparsePoint'; Object=$g.Name; Value=$item.FullName; Depth=0 })
+            }
+            if ($item.Name -match '^(MocArb|ImageStore|WorkingDirectory)$|\.a?vhd(x|s|pmem)?$') {
+                $refs.Add([pscustomobject]@{ Node=$env:COMPUTERNAME; Kind='PlatformContent'; Object=$g.Name; Value=$item.FullName; Depth=0 })
+            }
+        }
+    }
+    $refs
+} | Select-Object Node, Kind, Object, Value, Depth |
+    Export-Csv "$out\references-and-content.csv" -NoTypeInformation
 
 $paramErrors = New-Object System.Collections.Generic.List[string]
 Get-ClusterResource | ForEach-Object {
     $r = $_
     try {
         Get-ClusterParameter -InputObject $r -ErrorAction Stop | ForEach-Object {
-            if (($_.Value -is [string]) -and ($_.Value -match $GhostPathPattern)) {
+            # Match strings AND string arrays: a multi-valued parameter holding a ghost path
+            # was skipped entirely by a bare -is [string] test.
+            if (($_.Value -is [string] -or $_.Value -is [string[]]) -and
+                (@($_.Value) -match $GhostPathPattern)) {
                 [pscustomobject]@{ Resource = $r.Name; Parameter = $_.Name; Value = $_.Value }
             }
         }
@@ -1230,25 +1553,92 @@ Run all four. The condition is resolved only when all four are clean.
 $GhostPathPattern = '[\\/]ClusterStorage\.\d+([\\/]|$)'
 $nodes = (Get-ClusterNode | Where-Object State -eq 'Up').Name
 
-# 1) No ghost roots, and no VM or SMB reference, on any node.
-Invoke-Command -ComputerName $nodes -ArgumentList $GhostPathPattern -ScriptBlock {
+# Every node must be inspected, not just the reachable ones. A node that is Down, Paused, or
+# unreachable is UNVERIFIED, not clean, and ghost roots frequently appear precisely while a
+# node is drained for a solution update. Surface the gap instead of silently omitting it.
+$allNodes     = (Get-ClusterNode).Name
+$missingNodes = @($allNodes | Where-Object { $_ -notin $nodes })
+if ($missingNodes.Count) {
+    Write-Warning ("{0} node(s) were NOT inspected and remain unverified: {1}. This condition is NOT resolved until every node returns clean." -f `
+        $missingNodes.Count, ($missingNodes -join ', '))
+}
+
+# 1) No ghost roots, and no VM, PARENT-CHAIN, or SMB reference, on any node.
+$remotingErrors = @()
+$nodeResults = Invoke-Command -ComputerName $nodes -ArgumentList $GhostPathPattern -ScriptBlock {
     param($Pattern)
     $refs = @()
+    $unverifiedChains = @()
     foreach ($vm in (Get-VM -ErrorAction SilentlyContinue)) {
-        $refs += ($vm | Get-VMHardDiskDrive -ErrorAction SilentlyContinue |
-                  Where-Object { $_.Path -match $Pattern }).Path
+        # A mounted ISO is a reference too.
+        foreach ($dvd in ($vm | Get-VMDvdDrive -ErrorAction SilentlyContinue)) {
+            if ($dvd.Path -and ($dvd.Path -match $Pattern)) { $refs += $dvd.Path }
+        }
+        foreach ($d in ($vm | Get-VMHardDiskDrive -ErrorAction SilentlyContinue)) {
+            # Walk the FULL parent chain, not just the attached path. Checking only the
+            # attached disk lets a differencing/checkpoint PARENT sitting on a ghost root
+            # pass verification, which is the exact data-loss case Step 2A warns about.
+            $path = $d.Path; $depth = 0
+            while ($path -and $depth -lt 50) {
+                if ($path -match $Pattern) { $refs += $path }
+                # A file that does NOT EXIST ends the chain: an orphaned VM whose disk was
+                # already deleted is an ordinary field state and cannot hold a parent link.
+                if (-not (Test-Path -LiteralPath $path)) { break }
+                # A file that EXISTS but cannot be READ is different: coverage is unknown, so
+                # it counts as unverified rather than clean. Step 2A and the Path A audit both
+                # treat this as a reference, and verification must not be weaker than they are.
+                $vhd = Get-VHD -Path $path -ErrorAction SilentlyContinue
+                if (-not $vhd) { $unverifiedChains += "UNREADABLE: $($vm.Name) -> $path"; break }
+                $path = $vhd.ParentPath; $depth++
+            }
+        }
         $refs += @($vm.ConfigurationLocation, $vm.SnapshotFileLocation, $vm.SmartPagingFilePath) |
                  Where-Object { $_ -and ($_ -match $Pattern) }
     }
     $refs += (Get-SmbOpenFile -ErrorAction SilentlyContinue |
               Where-Object { $_.Path -match $Pattern }).Path
-    [pscustomobject]@{
-        Node       = $env:COMPUTERNAME
-        GhostRoots = (Get-ChildItem -Path 'C:\' -Directory -Filter 'ClusterStorage.*' -ErrorAction SilentlyContinue |
-                      Where-Object { $_.Name -match '^ClusterStorage\.\d+$' }).Count
-        References = @($refs | Where-Object { $_ }).Count
+    # Probe the SYSTEM drive, not a hardcoded C:, so a node whose system drive is not C:
+    # is not silently reported as clean because the wrong volume was inspected.
+    $sysRoot = "$($env:SystemDrive)\"
+    $roots = @(Get-ChildItem -Path $sysRoot -Directory -Filter 'ClusterStorage.*' -ErrorAction SilentlyContinue |
+               Where-Object { $_.Name -match '^ClusterStorage\.\d+$' })
+    # Any surviving root must still be free of reparse points and platform content, which
+    # the earlier version of this check omitted entirely.
+    $reparse = 0; $platform = 0
+    foreach ($r in $roots) {
+        $items = @($r) + @(Get-ChildItem -LiteralPath $r.FullName -Force -Recurse -ErrorAction SilentlyContinue)
+        $reparse  += @($items | Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReparsePoint }).Count
+        $platform += @($items | Where-Object { $_.Name -match '^(MocArb|ImageStore|WorkingDirectory)$|\.a?vhd(x|s|pmem)?$' }).Count
     }
-} | Select-Object Node, GhostRoots, References | Format-Table -AutoSize
+    [pscustomobject]@{
+        Node             = $env:COMPUTERNAME
+        GhostRoots       = $roots.Count
+        References       = @($refs | Where-Object { $_ }).Count
+        UnverifiedChains = $unverifiedChains.Count
+        ReparsePoints    = $reparse
+        PlatformItems    = $platform
+    }
+} -ErrorAction SilentlyContinue -ErrorVariable +remotingErrors
+
+# A node whose cluster state is Up can still fail Invoke-Command (WinRM down, credentials,
+# firewall). That node returns NO ROW, and a missing row is not a clean row. Reconcile the
+# nodes that actually ANSWERED against the full cluster membership, so an Up-but-unreachable
+# node cannot pass verification by silently producing nothing.
+$results   = @($nodeResults)
+$answered  = @($results | Select-Object -ExpandProperty Node -ErrorAction SilentlyContinue)
+$noAnswer  = @($allNodes | Where-Object {
+    $short = ($_ -split '\.')[0]
+    $short -notin @($answered | ForEach-Object { ($_ -split '\.')[0] })
+})
+if ($noAnswer.Count) {
+    Write-Warning ("{0} node(s) returned NO RESULT and are UNVERIFIED: {1}. A missing row is not a clean row; this condition is NOT resolved until every node answers clean." -f `
+        $noAnswer.Count, ($noAnswer -join ', '))
+}
+if ($remotingErrors.Count) {
+    Write-Warning ("{0} remoting error(s) occurred during verification; resolve them and re-run." -f $remotingErrors.Count)
+}
+
+$results | Select-Object Node, GhostRoots, References, UnverifiedChains, ReparsePoints, PlatformItems | Format-Table -AutoSize
 
 # 2) Every CSV is Online and mounted under the canonical root.
 Get-ClusterSharedVolume | ForEach-Object {
@@ -1266,7 +1656,10 @@ Get-ClusterResource | ForEach-Object {
     $r = $_
     try {
         Get-ClusterParameter -InputObject $r -ErrorAction Stop | ForEach-Object {
-            if (($_.Value -is [string]) -and ($_.Value -match $GhostPathPattern)) {
+            # Match strings AND string arrays: a multi-valued parameter holding a ghost path
+            # was skipped entirely by a bare -is [string] test.
+            if (($_.Value -is [string] -or $_.Value -is [string[]]) -and
+                (@($_.Value) -match $GhostPathPattern)) {
                 [pscustomobject]@{ Resource = $r.Name; Parameter = $_.Name; Value = $_.Value }
             }
         }
