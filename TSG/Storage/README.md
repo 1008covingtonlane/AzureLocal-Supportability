@@ -5,3 +5,4 @@
 * [Troubleshoot: Physical disks not claimed after insertion (`CanPool=False`)](./Troubleshoot-Storage-PhysicalDiskCanPoolFalse.md)
 * [Troubleshoot: Storage pool capacity threshold warning (fixed vs thin volumes)](./Troubleshoot-Storage-StoragePoolCapacityThreshold.md)
 * [Troubleshoot: Storage repair jobs restart and never complete (failing high-latency disk)](./Troubleshoot-Storage-RepairJobsRestartOnFailingDisk.md)
+* [Troubleshoot: Ghost CSV mount points (`C:\ClusterStorage.000`, `.001`, `.00X`)](./Troubleshoot-Storage-GhostCsvMountPoints.md)
