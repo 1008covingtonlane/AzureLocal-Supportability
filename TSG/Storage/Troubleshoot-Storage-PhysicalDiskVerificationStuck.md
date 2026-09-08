@@ -114,7 +114,7 @@ Get-PhysicalDisk | Where-Object { -not $_.CanPool } |
 ```
 
 - Confirm the disk model and firmware are on the vendor support matrix for this solution.
-- Confirm the disk is genuinely clean (no partitions and no foreign pool signature). If it is carrying stale metadata, that shows as a different `CannotPoolReason` (`In a Pool`); resolve it with the gated, destructive `Reset-PhysicalDisk` path in Step 2g of the companion guide, not here.
+- Confirm the disk is genuinely clean (no partitions and no foreign pool signature). If it is carrying stale metadata, that shows as a different `CannotPoolReason` (`In a Pool`); resolve it with the gated, destructive `Reset-PhysicalDisk` path in [Step 2h of the companion guide](./Troubleshoot-Storage-PhysicalDiskCanPoolFalse.md#step-2h-resolve-stale-metadata-or-previous-pool-membership), not here.
 - If you have **already** observed the same disk pool normally in a different cluster (for example during an earlier swap), treat that as strong evidence the media is fine and the local cluster is the problem. Do **not** move a disk into another **production** cluster just to test: a clean, eligible disk can be auto-claimed there, which writes pool metadata and can start a redistribution. If you need this confirmation, use a spare or non-production cluster.
 - Confirm the disks are added symmetrically (same count and type on each node). The Health Service evaluates the cluster as a whole; an asymmetric add can leave a disk unverified.
 
@@ -129,7 +129,7 @@ $hs = Get-ClusterResource -Name 'Health'
 $hs | Format-List Name, State, OwnerGroup, ResourceType
 
 # State of the group that owns the Health resource (commonly 'SDDC Group')
-Get-ClusterGroup -Name $hs.OwnerGroup | Format-Table Name, OwnerNode, State
+Get-ClusterGroup -Name $hs.OwnerGroup.Name | Format-Table Name, OwnerNode, State
 
 # Active health faults across the cluster
 Get-HealthFault
@@ -199,7 +199,7 @@ Run the block below as a whole. It is one continuous procedure: it inspects clus
 Get-ClusterNode | Format-Table Name, State
 Get-StorageJob
 $hs            = Get-ClusterResource -Name 'Health'
-$originalOwner = (Get-ClusterGroup -Name $hs.OwnerGroup).OwnerNode.Name
+$originalOwner = (Get-ClusterGroup -Name $hs.OwnerGroup.Name).OwnerNode.Name
 $upNodes       = @(Get-ClusterNode | Where-Object State -eq 'Up')
 $downNodes     = @(Get-ClusterNode | Where-Object State -ne 'Up')
 $activeJobs    = @(Get-StorageJob  | Where-Object JobState -ne 'Completed')
@@ -216,17 +216,17 @@ Update-HostStorageCache
 
 # 3. Reinitialize: multi-node fails the group over; single-node restarts the resource in place.
 if ($upNodes.Count -gt 1) {
-    Move-ClusterGroup -Name $hs.OwnerGroup          # Failover Clustering picks the target node
+    Move-ClusterGroup -Name $hs.OwnerGroup.Name     # Failover Clustering picks the target node
 } else {
     Stop-ClusterResource  -Name 'Health'            # no failover target on a single node
     Start-ClusterResource -Name 'Health'
 }
 
 # 4. Confirm the outcome: the group is Online, and (multi-node) the owner actually changed.
-$grp = Get-ClusterGroup -Name $hs.OwnerGroup
+$grp = Get-ClusterGroup -Name $hs.OwnerGroup.Name
 $grp | Format-Table Name, OwnerNode, State
 if ($upNodes.Count -gt 1 -and $grp.OwnerNode.Name -eq $originalOwner) {
-    Write-Warning "Health group did not move off $originalOwner. Retry with an explicit target (Move-ClusterGroup -Name '$($hs.OwnerGroup)' -Node <other-node>) or investigate why the move failed before continuing."
+    Write-Warning "Health group did not move off $originalOwner. Retry with an explicit target (Move-ClusterGroup -Name '$($hs.OwnerGroup.Name)' -Node <other-node>) or investigate why the move failed before continuing."
 }
 ```
 
@@ -374,7 +374,7 @@ Then collect diagnostics and escalate.
 Once the disks show `CanPool=True`, add them to the pool. On a standard single-pool Azure Local cluster, eligible disks are usually claimed automatically within a short time. If they are not, add them explicitly.
 
 > [!IMPORTANT]
-> Identify the intended disks by serial number and use `-PhysicalDisks`. Do not pipe `Get-PhysicalDisk -CanPool $true` directly into `Add-PhysicalDisk`, and do not rely on the pipeline form (it does not bind reliably). This block enforces a single non-primordial pool and verifies every intended serial matched exactly one eligible disk before adding. For more background see Step 3 of the companion guide: [Troubleshoot physical disks not claimed after insertion (`CanPool=False`)](./Troubleshoot-Storage-PhysicalDiskCanPoolFalse.md#step-3-manual-add-when-disks-are-eligible).
+> Identify the intended disks by serial number and use `-PhysicalDisks`. Do not pipe `Get-PhysicalDisk -CanPool $true` directly into `Add-PhysicalDisk`, and do not rely on the pipeline form (it does not bind reliably). This block enforces a single non-primordial pool and verifies every intended serial matched exactly one eligible disk before adding. For more background see Step 3 of the companion guide: [Troubleshoot physical disks not claimed after insertion (`CanPool=False`)](./Troubleshoot-Storage-PhysicalDiskCanPoolFalse.md#step-3-manually-add-disks-only-when-they-are-eligible).
 
 ```powershell
 $pool = Get-StoragePool -IsPrimordial $false
