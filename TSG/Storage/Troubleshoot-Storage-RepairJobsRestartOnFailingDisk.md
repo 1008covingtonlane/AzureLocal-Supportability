@@ -48,7 +48,7 @@ An important trap: this scenario is frequently misread as a capacity problem, be
   - Often also `Microsoft.Health.FaultType.StoragePool.PoolCapacityThresholdExceeded` and `Microsoft.Health.FaultType.Server.Storage.Degraded`.
 - Windows event log on the node that hosts the failing drive:
   - Source `disk`, Event ID **153**: "The IO operation at logical block address ... was retried." (often hundreds per hour).
-  - Source `Microsoft-Windows-StorageSpaces-Driver`, Event IDs **203** ("failed an IO operation. Return Code: STATUS_DEVICE_NOT_CONNECTED"), **205** ("Windows lost communication with physical disk"), **207** ("Physical disk ... arrived", indicating the drive is flapping), **209** ("failed a Read IO operation. Return Code: The I/O device reported an I/O error").
+  - Source `Microsoft-Windows-StorageSpaces-Driver`, Event IDs **203** (physical-disk I/O failure; the return code varies, for example `STATUS_DEVICE_NOT_CONNECTED`), **205** ("Windows lost communication with physical disk"), **207** ("Physical disk ... arrived"), **209** (physical-disk read-I/O failure; the return code varies, for example "The I/O device reported an I/O error"). Correlate repeated 205/207 loss-and-arrival events for the same disk before describing it as flapping; 207 alone records arrival.
   - Event ID **312** ("Virtual disk ... has failed a write operation to all its copies") and **302** ("pool disks hosting space meta-data ... failed a space meta-data update"), which accompany the No Redundancy state.
   - Event IDs **304** ("virtual disk ... is in a degraded state") and, after resolution, **305** ("Virtual disk ... is now healthy").
 - Optional and correlated: a node bugcheck `0x00000133 DPC_WATCHDOG_VIOLATION` under heavy write I/O, with the faulting stack in the storage completion path (`storport` / `CLASSPNP` / the S2D cluster block filter), on the same node that hosts the failing drive. In the System log this appears as BugCheck (Event ID 1001) and Kernel-Power 41.
@@ -89,11 +89,12 @@ Example from a real case: `ReadErrorsTotal = 1,252,510`, `ReadLatencyMax = 11,70
 ### Windows event log (on the node hosting the drive)
 
 - `disk` **153** "The IO operation ... was retried" (leading indicator, often hundreds per hour).
-- `Microsoft-Windows-StorageSpaces-Driver` **203** (failed IO / STATUS_DEVICE_NOT_CONNECTED), **205** (lost communication), **207** (drive "arrived" repeatedly, meaning it is flapping), **209** (failed Read IO / I/O device error).
+- `Microsoft-Windows-StorageSpaces-Driver` **203** (failed I/O; inspect the return code), **205** (lost communication), **207** (drive arrived), **209** (failed read I/O; inspect the return code). Repeated loss-and-arrival events for the same disk corroborate flapping; an arrival event alone does not.
 
 > [!IMPORTANT]
 > **Rule out the shared storage path before condemning a drive.** Lost-communication and
-> flapping events (203, 205, 207) say the connection to the device failed. They do not by
+> flapping patterns (205 followed by 207 for the same disk), or 203 with a
+> disconnected-device return code, indicate a device-connection problem. They do not by
 > themselves say the *drive* is at fault: a failing cable, SAS expander, backplane, or drive
 > slot produces the same events. Two quick discriminators:
 >
@@ -102,7 +103,7 @@ Example from a real case: `ReadErrorsTotal = 1,252,510`, `ReadLatencyMax = 11,70
 >   suspects by `PhysicalLocation` and by node.
 > - **Do the drive's own counters agree?** High `ReadErrorsUncorrected` and multi-second
 >   `ReadLatencyMax` on **only** this drive point at the drive. Clean counters with repeated
->   203/205/207 point at the path.
+>   loss-and-arrival events warrant investigating the path.
 >
 > If the evidence points at the path, engage the hardware vendor for the cable, backplane, or
 > controller rather than replacing a healthy drive. Retiring is still safe in the meantime,
