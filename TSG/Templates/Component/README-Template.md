@@ -21,8 +21,8 @@ Use one row per support article. Every linked article must carry a valid HTML-co
 | Applicable products | Name the Azure Local product or feature family explicitly, for example `Azure Local 23H2 solution update`, `Arc VM management`, or `Storage Spaces Direct`. Do not use `all` unless the article truly applies to every Azure Local product path. |
 | Supported versions | Name the supported release, build range, or `replace-me` until validated. |
 | Owner | Name the accountable team, component owner, or alias. |
-| Highest action classification | Use `[READ-ONLY]` when every action is non-mutating, `state-changing` when any action can change state, or `None, index-only` when the article has no actions. |
-| Highest state-changing risk | Use the highest state-changing action risk label from the linked article: `[LOW RISK]`, `[MEDIUM RISK]`, or `[HIGH RISK]`. Use `Not applicable` for read-only-only or index-only articles. |
+| Highest action classification | Use `read-only` when every action is non-mutating, `state-changing` when any action can change state, or `None, index-only` when the article has no actions. |
+| Most disruptive step | Use the strongest impact statement in the linked article: `Changes` when state-changing steps carry only `**Changes:**` statements, `Plan for` when any step needs a `**Plan for:**` line, or `Warning` when any step carries a `> [!WARNING]` callout. Use `Not applicable` for read-only-only or index-only articles. |
 | Workload or maintenance impact | State whether the linked article can affect workloads, require a maintenance window, require elevated privileges, or is `None known`. |
 | Metadata marker | Use `present` only after confirming the linked article contains the required metadata marker and validates against `../Templates/tsg-metadata.schema.json`. Otherwise use `missing` and fix the article before publishing. When `detector.type` is `none`, `detector.signal` must be JSON `null`; set both detector fields together when selecting another detector type. |
 | Technical grade | Record the article metadata `validation.technical_grade`. Use `null` until TSG-FORGE produces `A`, `B`, `C`, or `F`; do not invent a grade from the README alone. |
@@ -33,7 +33,7 @@ Use one row per support article. Every linked article must carry a valid HTML-co
 | Execution surface | Keep this distinct from automation readiness. Use `on-device`, `mixed`, `cloud-diagnostic`, `cloud-control`, or `thin`. |
 | Last validated | Use an ISO date such as `2026-08-17`, or `Not validated`. |
 
-For linked articles that include state-changing actions, confirm the article uses the canonical risk labels `[LOW RISK]`, `[MEDIUM RISK]`, or `[HIGH RISK]` and includes pre-check, action, expected result or output, stop condition, rollback, and verification steps.
+For linked articles that include state-changing actions, confirm each state-changing step has a `**Changes:**` statement, plus `**Plan for:**` or a `> [!WARNING]` callout when needed, and includes pre-check, action, expected result or output, stop condition, rollback, and verification steps.
 
 ### Technical grade and automation rubric
 
@@ -66,9 +66,9 @@ If older review text says validation grade, read it as the article metadata fiel
 
 ### {TOPIC_AREA_1}
 <!-- Instructions: Replace {TOPIC_AREA_1} with a descriptive topic area name (e.g., "Arc Gateway & Outbound Connectivity") -->
-| Article type | Title | Link | Applicable products | Supported versions | Owner | Highest action classification | Highest state-changing risk | Workload or maintenance impact | Metadata marker | Technical grade | Validation evidence | Fidelity level | Reproduction substrate | Automation readiness | Execution surface | Last validated |
+| Article type | Title | Link | Applicable products | Supported versions | Owner | Highest action classification | Most disruptive step | Workload or maintenance impact | Metadata marker | Technical grade | Validation evidence | Fidelity level | Reproduction substrate | Automation readiness | Execution surface | Last validated |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| {DOC_TYPE} | {DOC_TITLE} | [{FILE_NAME}.md]({FOLDER_NAME}/{FILE_NAME}.md) | {APPLICABLE_PRODUCTS} | {SUPPORTED_VERSIONS} | {OWNER} | {[READ-ONLY], state-changing, or None, index-only} | {[LOW RISK], [MEDIUM RISK], [HIGH RISK], or Not applicable} | {WORKLOAD_OR_MAINTENANCE_IMPACT} | {present or missing} | {A, B, C, F, or null} | {SPEC_REF, report name, PR evidence, or None yet} | {L0, L1, L2, L3, or L4} | {vm, hardware, either, or none} | {not-assessed, scaffold, ready, proven, blocked, or manual} | {on-device, mixed, cloud-diagnostic, cloud-control, or thin} | {YYYY-MM-DD or Not validated} |
+| {DOC_TYPE} | {DOC_TITLE} | [{FILE_NAME}.md]({FOLDER_NAME}/{FILE_NAME}.md) | {APPLICABLE_PRODUCTS} | {SUPPORTED_VERSIONS} | {OWNER} | {read-only, state-changing, or None, index-only} | {Changes, Plan for, Warning, or Not applicable} | {WORKLOAD_OR_MAINTENANCE_IMPACT} | {present or missing} | {A, B, C, F, or null} | {SPEC_REF, report name, PR evidence, or None yet} | {L0, L1, L2, L3, or L4} | {vm, hardware, either, or none} | {not-assessed, scaffold, ready, proven, blocked, or manual} | {on-device, mixed, cloud-diagnostic, cloud-control, or thin} | {YYYY-MM-DD or Not validated} |
 <!-- Instructions: 
      - Replace {DOC_TYPE} with the schema document_type token: troubleshoot, reference, how-to, deep-dive, or overview
      - Replace {DOC_TITLE} with descriptive title
@@ -77,8 +77,8 @@ If older review text says validation grade, read it as the article metadata fiel
      - Replace {APPLICABLE_PRODUCTS} with explicit Azure Local product or feature scope
      - Replace {SUPPORTED_VERSIONS} with the supported release or build range
      - Replace {OWNER} with the accountable team, component owner, or alias
-     - Replace {[READ-ONLY], state-changing, or None, index-only} with the linked-article action classification
-     - Replace {[LOW RISK], [MEDIUM RISK], [HIGH RISK], or Not applicable} with the highest linked-article state-changing risk
+     - Replace {read-only, state-changing, or None, index-only} with the linked-article action classification
+     - Replace {Changes, Plan for, Warning, or Not applicable} with the most disruptive linked-article step
      - Replace {WORKLOAD_OR_MAINTENANCE_IMPACT} with workload, privilege, maintenance-window, or downtime impact
      - Replace {present or missing} after checking the article metadata marker
      - Replace {SPEC_REF, report name, PR evidence, or None yet} with the validation evidence source
@@ -88,9 +88,9 @@ If older review text says validation grade, read it as the article metadata fiel
      Repeat this row pattern for each document in the topic area -->
 
 ### {TOPIC_AREA_2}
-| Article type | Title | Link | Applicable products | Supported versions | Owner | Highest action classification | Highest state-changing risk | Workload or maintenance impact | Metadata marker | Technical grade | Validation evidence | Fidelity level | Reproduction substrate | Automation readiness | Execution surface | Last validated |
+| Article type | Title | Link | Applicable products | Supported versions | Owner | Highest action classification | Most disruptive step | Workload or maintenance impact | Metadata marker | Technical grade | Validation evidence | Fidelity level | Reproduction substrate | Automation readiness | Execution surface | Last validated |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| {DOC_TYPE} | {DOC_TITLE} | [{FILE_NAME}.md]({FOLDER_NAME}/{FILE_NAME}.md) | {APPLICABLE_PRODUCTS} | {SUPPORTED_VERSIONS} | {OWNER} | {[READ-ONLY], state-changing, or None, index-only} | {[LOW RISK], [MEDIUM RISK], [HIGH RISK], or Not applicable} | {WORKLOAD_OR_MAINTENANCE_IMPACT} | {present or missing} | {A, B, C, F, or null} | {SPEC_REF, report name, PR evidence, or None yet} | {L0, L1, L2, L3, or L4} | {vm, hardware, either, or none} | {not-assessed, scaffold, ready, proven, blocked, or manual} | {on-device, mixed, cloud-diagnostic, cloud-control, or thin} | {YYYY-MM-DD or Not validated} |
+| {DOC_TYPE} | {DOC_TITLE} | [{FILE_NAME}.md]({FOLDER_NAME}/{FILE_NAME}.md) | {APPLICABLE_PRODUCTS} | {SUPPORTED_VERSIONS} | {OWNER} | {read-only, state-changing, or None, index-only} | {Changes, Plan for, Warning, or Not applicable} | {WORKLOAD_OR_MAINTENANCE_IMPACT} | {present or missing} | {A, B, C, F, or null} | {SPEC_REF, report name, PR evidence, or None yet} | {L0, L1, L2, L3, or L4} | {vm, hardware, either, or none} | {not-assessed, scaffold, ready, proven, blocked, or manual} | {on-device, mixed, cloud-diagnostic, cloud-control, or thin} | {YYYY-MM-DD or Not validated} |
 <!-- Add more documents as needed -->
 
 <!-- Instructions: Add more topic areas as needed. Typical components have 3-5 major topic areas. -->
@@ -100,7 +100,7 @@ If older review text says validation grade, read it as the article metadata fiel
 - Update this index whenever an article is added, moved, renamed, re-owned, re-validated, or converted for automation.
 - Keep applicable products and supported versions explicit in every row.
 - Keep the owner field current so support, partner, OEM, and engineering readers know where to route follow-up.
-- Keep action classification, state-changing risk, workload or maintenance impact, technical grade, validation evidence, fidelity level, reproduction substrate, automation readiness, execution surface, and last validated aligned with the linked article metadata and latest validation evidence.
+- Keep action classification, most disruptive step, workload or maintenance impact, technical grade, validation evidence, fidelity level, reproduction substrate, automation readiness, execution surface, and last validated aligned with the linked article metadata and latest validation evidence.
 - Use only public Microsoft links for external references in public article rows.
 
 ## Before submitting this copied README
@@ -111,10 +111,10 @@ Use this gate after copying the template to `TSG/{Component}/README.md`.
 | --- | --- |
 | Placeholders and instructions | No `{PLACEHOLDER}` values or `<!-- Instructions:` comments remain. |
 | Copied-context links | `[CONTRIBUTING.md](CONTRIBUTING.md)` resolves to the component contribution guide, and `[repository CONTRIBUTING.md](../../CONTRIBUTING.md)` resolves to the repository contribution guide. |
-| Inventory columns | Every topic table keeps Article type, Title, Link, Applicable products, Supported versions, Owner, Highest action classification, Highest state-changing risk, Workload or maintenance impact, Metadata marker, Technical grade, Validation evidence, Fidelity level, Reproduction substrate, Automation readiness, Execution surface, and Last validated. |
-| Required row values | Every row has a schema-valid document type plus explicit applicable products, supported versions, accountable owner, highest action classification, highest state-changing risk or `Not applicable`, workload or maintenance impact, technical grade from `validation.technical_grade`, validation evidence, fidelity level, reproduction substrate, non-placeholder automation readiness, execution surface, and last validated value. |
+| Inventory columns | Every topic table keeps Article type, Title, Link, Applicable products, Supported versions, Owner, Highest action classification, Most disruptive step, Workload or maintenance impact, Metadata marker, Technical grade, Validation evidence, Fidelity level, Reproduction substrate, Automation readiness, Execution surface, and Last validated. |
+| Required row values | Every row has a schema-valid document type plus explicit applicable products, supported versions, accountable owner, highest action classification, most disruptive step or `Not applicable`, workload or maintenance impact, technical grade from `validation.technical_grade`, validation evidence, fidelity level, reproduction substrate, non-placeholder automation readiness, execution surface, and last validated value. |
 | Metadata marker | Every linked article has the required `azure-local-supportability/tsg-metadata/v1` marker, validates against `../Templates/tsg-metadata.schema.json`, and uses `detector.signal: null` when `detector.type` is `none` before its row is marked `present`. |
-| State-changing articles | Any linked article with state-changing actions keeps risk labels, privilege requirements, workload-impact or maintenance-window gates, pre-check, action, expected result or output, stop condition, rollback, expected rollback output, rollback verification, escalation, and final verification in the linked article. |
+| State-changing articles | Any linked article with state-changing actions keeps `**Changes:**` and `**Plan for:**` statements and warning callouts, privilege requirements, workload-impact or maintenance-window gates, pre-check, action, expected result or output, stop condition, rollback, expected rollback output, rollback verification, escalation, and final verification in the linked article. |
 | Row order | Rows are sorted or grouped consistently within each topic area so repeated site work stays predictable. |
 | Public-link hygiene | External references in article rows use public Microsoft links only. |
 | Evidence | The pull request notes what was checked, including placeholder removal, copied-context link validation, metadata-marker confirmation, and latest lint result. |
