@@ -5,10 +5,10 @@
   "products": ["Azure Local", "Azure Local VMs", "AKS enabled by Azure Arc"],
   "detector": {"type": "command", "signal": "Test-SupportAksArcKnownIssues"},
   "validation": {
-    "fidelity_level": "L0",
-    "technical_grade": null,
+    "fidelity_level": "L4",
+    "technical_grade": "A",
     "reproduction_substrate": "vm",
-    "automation_status": "scaffold",
+    "automation_status": "proven",
     "last_validated": "2026-11-25",
     "spec_ref": "AzLocal_AKSArc_SupportModule_KnownIssues"
   }
