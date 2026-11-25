@@ -59,6 +59,7 @@
 | 2026-11-24 | The manual alternative's dependency check now stops with `No changes were made` when a module manifest builds a file path with an expression, such as joined strings or `-f`, that it cannot resolve without running the manifest, instead of checking the parts of the path separately. |
 | 2026-11-25 | The manual alternative's dependency check now treats a `NestedModules` entry that names the module with a version (`RequiredVersion`, `ModuleVersion`, or `MaximumVersion`, with or without a module GUID) as a requirement, as it does for `RequiredModules` and `ModuleList`, and stops with `No changes were made` when only a version that it would remove meets the entry. PowerShell loads such an entry from the module path, so the module that lists it cannot be imported once that version is gone; an entry that gives only the module name needs no particular version. The article previously said that these entries did not matter. The check also lists the modules that have such an entry, which `Get-Module` left out of its list when it ran with the block's setting to stop at the first error. The checklist before you run the recipe-aware helper, and its read-only list, now cover only the versions that the helper removes: those of the recipe modules that fail the same test as the validator, and the `Az.Accounts` versions other than the recipe version; a module that passes the test keeps its older versions. After the manual alternative, the stops that list users who are not signed in, or ask you to set `$AssumeDefaultDocumentsForSignedOutUsers` to `$false` or `$true`, now point to the steps for that stop; contact Microsoft Support only if the block still stops after those users sign in or the setting is changed. |
 | 2026-11-25 | The manual alternative now lists the installed modules in a separate PowerShell process (a background job) and reads back only their names, versions, paths, and requirements. In Windows PowerShell 5.1, listing them in the block's own session loaded the newest installed version of a module that another module names in `NestedModules`, and the block then stopped with `The module became loaded. No versions will be removed.` on every run, even when a version that it keeps met that entry. If the separate listing fails, the block stops with `No changes were made`. The check for the recipe-aware helper now looks only in `AzureLocalImageModule` (`Get-Command -Name Remediate-PSModules -Module AzureLocalImageModule`), as the import and helper blocks do, instead of searching every module. |
+| 2026-11-25 | When a check before the recipe-aware helper fails, the article now says that the manual alternative is for nodes without the helper and stops on a node that has it, with `Use the recipe-aware helper instead of the manual alternative.`, and that this message does not mean the helper is safe to run. Before, it pointed to the manual alternative as if it could run there. |
 
 ## Overview
 
@@ -393,9 +394,11 @@ module fails the test, so the helper would change nothing. An error means the dr
 unknown: do not run the helper.
 
 If either check fails, do not run the helper; contact Microsoft Support. The
-[manual alternative](#manual-alternative-for-nodes-without-the-helper) makes the
-dependent-module check itself and stops before any change, but use it only with
-Microsoft Support guidance.
+[manual alternative](#manual-alternative-for-nodes-without-the-helper) checks
+dependent modules itself, but it is for nodes without the helper: on a node that
+has the helper, it stops before any change with
+`Use the recipe-aware helper instead of the manual alternative.` That message does
+not mean the helper is safe to run after a failed check.
 
 Paste or run the whole block at once. It runs as one statement, so if the helper is
 unavailable the check stops the block before `Remediate-PSModules` runs.
