@@ -60,7 +60,7 @@ Use this guide on Azure Local 2311.2 or later when you see any of these problems
 
 - Azure Local 2311.2 or later, with the Moc PowerShell module that Azure Local installs on every machine.
 - Sign in directly to one machine of your Azure Local instance, at the console or with Remote Desktop, using your deployment user account or another account that is an administrator on every machine. Open Windows PowerShell as Administrator.
-- Don't run the module in a remote PowerShell session, such as `Enter-PSSession` or `Invoke-Command`. The test connects from the machine you're signed in to, to every machine in the instance whose state is Up, by using PowerShell remoting. A remote session can't pass your sign-in on to those machines.
+- Don't run the module in a remote PowerShell session, such as `Enter-PSSession` or `Invoke-Command`. The test uses PowerShell remoting from the machine you're signed in to, to reach every machine in the instance that is Up. A remote session can't pass your sign-in on to those machines.
 - PowerShell remoting (WinRM) must work from that machine to every machine in the instance that is Up. `Get-ClusterNode` shows the state of each machine.
 - Access to the PowerShell Gallery, directly or through your proxy. You need it to install the module, and each time the module loads it checks the gallery for a newer version.
 
