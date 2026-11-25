@@ -8,11 +8,11 @@
     "signal": "Issue Validation reports OlderThanOneDay greater than 0: folders named AzStackHci.EnvironmentChecker.* inside a folder with a random name such as abcd1234.xyz under C:\\Users\\HCIOrchestrator\\AppData\\Local\\Temp, last changed more than one day ago"
   },
   "validation": {
-    "fidelity_level": "L0",
-    "technical_grade": null,
+    "fidelity_level": "L4",
+    "technical_grade": "A",
     "reproduction_substrate": "vm",
-    "automation_status": "ready",
-    "last_validated": null,
+    "automation_status": "proven",
+    "last_validated": "2026-11-25",
     "spec_ref": "KnownIssue_EnvironmentChecker_HighTempDiskUsage"
   }
 }
@@ -50,22 +50,22 @@ TEMP here is the temporary files folder of the `HCIOrchestrator` account. Each l
 
 When Azure Local runs the Environment Checker health checks for a solution update, it uses the Environment Checker version in the update package. Earlier builds copied that package into a new folder with a random name in the `HCIOrchestrator` account's TEMP folder each time, and never removed it.
 
-Current builds use one reusable folder named `AzStackHci.EnvironmentChecker.NugetsForUpdate` instead. When they run these checks, they also remove random-named folders that are more than one day old from the TEMP folder on the node where the checks run. Folders left by earlier builds can therefore stay on a node, especially on nodes where the checks have not run since, until you remove them with the steps below. The steps are safe on any build, so you do not need to know which build added this change.
+Current builds use one reusable folder named `AzStackHci.EnvironmentChecker.NugetsForUpdate` instead. When they run these checks, they also remove random-named folders that are more than one day old from the TEMP folder of the account that runs the checks, on the node where they run. Folders left by earlier builds can therefore stay on a node, especially on nodes where the checks have not run since, until you remove them with the steps below. The steps are safe on any build, so you do not need to know which build added this change.
 
-The `AzStackHci.EnvironmentChecker.NugetsForUpdate` folder is expected on current builds. The steps below do not count or remove it.
+On current builds, the `AzStackHci.EnvironmentChecker.NugetsForUpdate` folder can be present after an update. It is expected, and the steps below do not count or remove it.
 
 ## Where you can see this problem
 
 | Administrator surface | Status | What to check |
 | --- | --- | --- |
 | PowerShell on each node | Shown | Run the [Issue Validation](#issue-validation) script. |
-| Deployment and update logs (`C:\CloudDeployment\Logs`) | Shown | Each time a build without the fix creates one of these folders, the Environment Checker step writes `Installing AzStackHci.EnvironmentChecker to <folder>.` with the folder's full path. |
-| Azure portal | Not evident | The portal does not list these folders. If they fill the system drive, the Updates page shows the [system drive free space check](./Troubleshooting-Test-SystemDrive-Free-Space.md) instead. |
+| Deployment and update logs (`C:\CloudDeployment\Logs`) | Shown | Each time the Environment Checker from an update package is unpacked, `EnvironmentValidatorFull.<date>.log` records `Installing AzStackHci.EnvironmentChecker to <folder>.` On a build without the fix, `<folder>` is one of these random-named folders. |
+| Azure portal | Not evident | No system health check looks for these folders, so the portal does not list them. If they fill the system drive, the Updates page shows the [system drive free space check](./Troubleshooting-Test-SystemDrive-Free-Space.md) instead. |
 | Windows event logs | Not evident | No event names these folders. |
 | Cluster logs (`Get-ClusterLog`) | Not evident | The folders are not a cluster resource, so the cluster log does not record them. |
 | Failover Cluster Manager | Not evident | The folders do not change any cluster role, resource, or node state. |
-| Windows Admin Center on a standalone host | Not evident | No alert or health item names these folders. |
-| Windows Admin Center in the Azure portal | Not evident | No alert or health item names these folders. |
+| Windows Admin Center on a standalone host | Not evident | The folders raise no Health Service fault, so the cluster Alerts list does not show them. |
+| Windows Admin Center in the Azure portal | Not evident | The folders raise no Health Service fault, so the cluster Alerts list does not show them. |
 
 ## Issue Validation
 
@@ -137,7 +137,7 @@ foreach ($tnf in $tempNugetFolders)
 Expected output (no output means that the script found no `AzStackHci.EnvironmentChecker.*` folders):
 
 - One `Removing temp nuget folder <folder>` line for each folder that it deletes.
-- `Skipping removal of temp nuget folder <folder> as it does not match expected pattern.` means the script found an `AzStackHci.EnvironmentChecker.*` folder whose parent folder does not have a random name, and left it alone. On current builds you see this line for the TEMP folder itself and for `AzStackHci.EnvironmentChecker.NugetsForUpdate`. Neither one is removed.
+- `Skipping removal of temp nuget folder <folder> as it does not match expected pattern.` means the script found an `AzStackHci.EnvironmentChecker.*` folder whose parent folder does not have a random name, and left it alone. If the `AzStackHci.EnvironmentChecker.NugetsForUpdate` folder is present, you see this line for it and for the TEMP folder itself. Neither one is removed.
 - `Skipping removal ... less than 1 days.` means that folder was changed in the last day. It is left in place.
 - `Unable to remove temp nuget folder` (in red) means a file in that folder is in use or access was denied. Run the script again later. If the same folder still cannot be removed, see [When to contact Microsoft support](#when-to-contact-microsoft-support).
 
