@@ -76,7 +76,7 @@ Import-Module Support.AksArc
 
 ```
 
-`Install-Module` asks you to confirm installing from the PSGallery repository, which isn't trusted by default, and to accept the module license. Answer Yes to both. When the module loads, it prints `Checking if you are on the latest version`, a warning that some commands from the module `Common` use unapproved verbs, and a disclaimer that starts with `THE SOFTWARE IS PROVIDED "AS IS"`. These are expected.
+`Install-Module` asks you to confirm installing from the PSGallery repository, which isn't trusted by default, and to accept the module license. Answer Yes to both. When the module loads, it shows a disclaimer that starts with `THE SOFTWARE IS PROVIDED "AS IS"` and then prints `Checking if you are on the latest version`. It can also show a warning that some commands from the module `Common` use unapproved verbs. These are expected.
 
 If the module was already installed, update it before you use it, so that you run the current tests:
 
@@ -110,16 +110,16 @@ The test takes about a minute on a three-machine instance. Version 1.3.164 of th
 
 It only reports what it finds. It doesn't fix anything. Machines that are Down or Paused aren't checked. While it runs, it also prints many `VERBOSE:` progress lines. They're expected.
 
-The output lists each test with its `Test Name`, its `Status`, and a `Message`, and ends with a summary line. For example output, see [Use the Support tool to troubleshoot and fix Azure Local infrastructure problems](https://learn.microsoft.com/azure/azure-local/manage/remediate-support-tool-infrastructure). Use this table to decide what to do next:
+The output ends with a summary line, followed by a table that lists each test with its `TestName`, its `Status`, and a `Message`. For example output, see [Use the Support tool to troubleshoot and fix Azure Local infrastructure problems](https://learn.microsoft.com/azure/azure-local/manage/remediate-support-tool-infrastructure). Use this table to decide what to do next:
 
 | What you see | What it means | What to do |
 | --- | --- | --- |
-| Every test shows `Passed`, followed by `All tests passed successfully.` | The module found no known issue. | Don't run the remediation command. If you still have a problem, see [Support](#support). |
-| One or more tests show `Failed` or `Error`, followed by `Some tests failed. Run Invoke-SupportAksArcRemediation to remediate issues.` | The module found a known issue, or a test couldn't finish. | Run the remediation command in the next section. |
+| The summary `All tests passed successfully.`, and every test in the table shows `Passed` | The module found no known issue. | Don't run the remediation command. If you still have a problem, see [Support](#support). |
+| The summary `Some tests failed. Run Invoke-SupportAksArcRemediation to remediate issues.`, and one or more tests in the table show `Failed` or `Error` | The module found a known issue, or a test couldn't finish. | Run the remediation command in the next section. |
 | No table, and the error `Critical Test Failover Cluster service not responsive or not running failed: Failover Cluster service is not running on node: <machine>. Exception: A parameter cannot be found that matches parameter name 'ComputerName'.` | You ran the test in PowerShell 7. The result isn't valid. | Don't run the remediation command. Open Windows PowerShell 5.1 as described in [Prerequisites](#prerequisites), and run the test again. |
 | No table, and any other error `Critical Test <test name> failed: <message>` | A critical check failed. The module stops, because the later results can't be trusted. | Run the remediation command in the next section. |
 | The error `Please ensure you are running this script directly on the host and not over remote powershell` | The module couldn't reach every machine that is Up over PowerShell remoting. It ran no tests. | Don't run the remediation command. Sign in directly to a machine as described in [Prerequisites](#prerequisites). If you already did, fix PowerShell remoting to the machine named in the error `Remote PowerShell is not available on node: <machine>`, and then run the test again. |
-| Tests show only `Passed` or `Warning`, followed by `Tests completed with warnings. Review warning details before remediation.` | The module found a condition to review, such as no isolated user storage container. | Read the `Message` of each `Warning` test and follow it. The remediation command doesn't change anything for a warning. |
+| The summary `Tests completed with warnings. Review warning details before remediation.`, and the tests in the table show only `Passed` or `Warning` | The module found a condition to review, such as no isolated user storage container. | Read the `Message` of each `Warning` test and follow it. The remediation command doesn't change anything for a warning. |
 
 ### Test for issues with remediation
 
@@ -165,6 +165,7 @@ When you contact Microsoft Support, include the full console output of both comm
 
 ```powershell
 Start-Transcript -Path "$env:USERPROFILE\Desktop\Support-AksArc-$(Get-Date -Format yyyyMMdd-HHmmss).txt"
+Import-Module -Name Support.AksArc
 Get-Module -Name Support.AksArc | Select-Object Name, Version
 Get-SolutionUpdateEnvironment | Select-Object CurrentVersion
 Test-SupportAksArcKnownIssues
