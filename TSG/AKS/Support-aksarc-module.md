@@ -175,7 +175,7 @@ The fix worked when no test is listed, no error is shown, and the last line show
 ## Support
 Review Azure Local  documentation or contact Microsoft Support for unresolved issues.
 
-When you contact Microsoft Support, include the full console output of both commands, the Support.AksArc module version, and your Azure Local version. To save the console output to a file, start a transcript before you run the commands, and stop it afterward:
+When you contact Microsoft Support, include the Support.AksArc module version, your Azure Local version, and the output of a new test run. This block saves all three to a file on your Desktop. If you ran the remediation command, also copy its console output into the case.
 
 **Changes:** writes a transcript file to your Desktop. It doesn't change Azure Local.
 
