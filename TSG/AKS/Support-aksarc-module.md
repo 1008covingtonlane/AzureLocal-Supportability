@@ -123,7 +123,7 @@ The output lists each test with its `Test Name`, its `Status`, and a `Message`, 
 
 ### Test for issues with remediation
 
-Run this command only when the test above reported a `Failed` or `Error` test, or the `Critical Test` error. It reruns every test and fixes only the tests that don't pass.
+Run this command only when the test above reported a `Failed` or `Error` test, or the `Critical Test` error. It reruns every test and fixes only the tests that don't pass. On a three-machine instance with one failed test, it took about 75 seconds; the time depends on the fixes it applies.
 
 **Changes:** depending on the failing test, the fix can:
 
