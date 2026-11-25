@@ -142,6 +142,7 @@ It doesn't restart the Failover Cluster service or the Hyper-V Virtual Machine M
 > The module doesn't undo its fixes. An MOC update stays in place. If the test `Validate Virtual Machine Stuck In Deleting Due To OS Disk Lock` failed, the fix stops and removes every VM that its message lists. Before you run the command, read that message and confirm that you meant to delete those VMs.
 
 ```powershell
+if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Run this command in Windows PowerShell 5.1 (powershell.exe), not PowerShell 7.' }
 Invoke-SupportAksArcRemediation
 
 ```
