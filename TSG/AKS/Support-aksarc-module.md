@@ -139,7 +139,7 @@ It doesn't restart the Failover Cluster service or the Hyper-V Virtual Machine M
 **Plan for:** Azure Local VM and AKS Arc management operations, such as creating, changing, or deleting a VM, can fail while MOC agents restart or MOC updates. Apart from removing VMs that failed to delete, the fixes work on the MOC infrastructure, not on running VMs. Machines that are Down or Paused aren't fixed. Run the command in a maintenance window.
 
 > [!WARNING]
-> The module doesn't undo its fixes. An MOC update stays in place. If the test `Validate Virtual Machine Stuck In Deleting Due To OS Disk Lock` failed, the fix stops and removes every VM that its message lists. Before you run the command, read that message and confirm that you meant to delete those VMs.
+> The module doesn't undo its fixes. An MOC update stays in place. If the test `Validate Virtual Machine Stuck In Deleting Due To OS Disk Lock` failed, the fix stops and removes every VM that its message lists. Before you run the command, read that message and confirm that you meant to delete those VMs. If you didn't, fix only the other failing tests, one at a time, as described after this command.
 
 ```powershell
 if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Run this command in Windows PowerShell 5.1 (powershell.exe), not PowerShell 7.' }
@@ -147,13 +147,29 @@ Invoke-SupportAksArcRemediation
 
 ```
 
-For each test, the command prints `No remediation required for <test>.`, or `Remediation for <test> is required.` followed by `succeeded.` or `failed.` Some tests have no automatic fix. For those, the command prints `Auto Remediation not available. Please Restart the Node manually, which has the issue` and still reports success, but it changed nothing. Restart the machine named in the test message as described in [Suspend and resume Azure Local machines for maintenance](https://learn.microsoft.com/azure/azure-local/manage/suspend-resume-cluster-maintenance), or contact Microsoft Support.
+For each test, the command prints either `No remediation required for <test>.`, or `Remediation for <test> is required.` and then `Remediation for <test> succeeded.` or the warning `Remediation for <test> failed.` Some tests have no automatic fix. For those, the command prints `Auto Remediation not available. Please Restart the Node manually, which has the issue` and still reports success, but it changed nothing. Restart the machine named in the test message as described in [Suspend and resume Azure Local machines for maintenance](https://learn.microsoft.com/azure/azure-local/manage/suspend-resume-cluster-maintenance), or contact Microsoft Support.
 
-To fix one test only, run `Invoke-SupportAksArcRemediation -TestId <ID>`. The test command shows each ID in its `Running test: <test name> with ID: <ID>` line.
+To fix one test only, find its ID in the `Running test: <test name> with ID: <ID>` line of the test output, for example `MOC-0018`, and run the remediation for that ID.
+
+**Changes:** applies only that test's fix, from the list above.
+
+```powershell
+if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Run this command in Windows PowerShell 5.1 (powershell.exe), not PowerShell 7.' }
+Invoke-SupportAksArcRemediation -TestId <ID>
+```
 
 ### Verify the fix
 
-Run `Test-SupportAksArcKnownIssues` again. Confirm that every test shows `Passed`, that the summary line is `All tests passed successfully.`, and that the command reports no error. If any test still shows `Failed` or `Error`, or the error remains, see [Support](#support).
+Run the test again, and list any test that failed:
+
+```powershell
+$results = @(Test-SupportAksArcKnownIssues)
+$failed = @($results | Where-Object { $_.Status -in 'Failed', 'Error' })
+$failed | Format-Table TestName, Status, Message -AutoSize
+"Tests run: $($results.Count). Failed or error: $($failed.Count)."
+```
+
+The fix worked when no test is listed, no error is shown, and the last line shows `Failed or error: 0` with a test count above 0, for example `Tests run: 23. Failed or error: 0.` `Tests run: 0` means an error stopped the run. A `Warning` test isn't listed; handle it as described in the results table. If any test is listed, or an error remains, see [Support](#support).
 
 
 ## Support
