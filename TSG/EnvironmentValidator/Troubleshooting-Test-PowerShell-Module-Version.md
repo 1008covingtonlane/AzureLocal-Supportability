@@ -63,6 +63,7 @@
 | 2026-11-25 | When a check before the recipe-aware helper fails, the article now says that the manual alternative is for nodes without the helper and stops on a node that has it, with `Use the recipe-aware helper instead of the manual alternative.`, and that this message does not mean the helper is safe to run. Before, it pointed to the manual alternative as if it could run there. |
 | 2026-11-25 | Moved the record of the lab tests from the Validation row at the top of the article to [Validation record](#validation-record) at the end, unchanged. The Validation row now gives a short summary and links to it. |
 | 2026-11-25 | In the per-node view of the last system health check in [Symptoms](#symptoms), a node that has no entry, or an entry without a `Detail`, now goes to the read-only check in [Issue validation](#issue-validation). The article no longer says why an entry can be missing. |
+| 2026-11-25 | [Administrator detection surfaces](#administrator-detection-surfaces) now covers Windows Admin Center in the Azure portal: its **Events** tool shows the same Event ID 17205 entry. |
 
 ## Overview
 
@@ -1013,11 +1014,10 @@ present, for about 15 minutes, before the module was repaired.
 | Cluster logs (`Get-ClusterLog`) | not evident | `Get-ClusterLog -TimeSpan 15` from all three nodes (about 65 MB), covering the time the module was missing and a full system health check, contains no entry for this check, its title, or `Test-PSModules`. |
 | Windows Failover Cluster Manager | not evident | No node, role, or resource changed state compared with a snapshot taken just before the module was removed, and `Microsoft-Windows-FailoverClustering/Operational` recorded no Critical, Error, or Warning event in the same 15 minutes. The other cluster-tool events in that time were `Microsoft-Windows-FailoverClustering-NetFt/Operational` Event ID 57344 timer-skew warnings and `Microsoft-Windows-FailoverClustering-Manager/Admin` Event ID 4657 errors about a `Get-ClusterParameter` property named `CauResourceName`; neither concerns PowerShell modules. |
 | Windows Admin Center (standalone) | shown | Inferred, not viewed in Windows Admin Center: on a node connection, the **Events** tool reads the same **AzStackHciEnvironmentChecker** log, so it carries the Event ID 17205 entry described in the Windows event logs row. The cluster dashboard **Alerts** do not carry this failure: no new Health Service fault was raised while the module was missing (`Get-HealthFault` compared with the snapshot taken just before). The **Updates** tool was not checked. |
-| Windows Admin Center in the Azure portal | absent | Not characterized. |
+| Windows Admin Center in the Azure portal | shown | Inferred, not viewed in the Azure portal: Windows Admin Center in the Azure portal includes the same **Events** tool ([Manage Azure Local clusters using Windows Admin Center in Azure](https://learn.microsoft.com/windows-server/manage/windows-admin-center/azure/manage-hci-clusters)), so on a node connection it shows the Event ID 17205 entry described in the Windows event logs row. As in the standalone row, its dashboard alerts do not carry this failure. |
 | Component / tool log files | shown | Each system health check writes `HealthCheckResult.EnvironmentChecker.<date-time>.json` to `C:\ClusterStorage\Infrastructure_1\Shares\SU1_Infrastructure_1\Updates\HealthCheck\System`. In the lab run it listed this check as `FAILURE` for the affected node with the `Failed to parse installed version` detail. A validator run that you start yourself also writes `%USERPROFILE%\.AzStackHci\AzStackHciEnvironmentChecker.log`; retain both for support. |
 
-`absent` denotes an uncharacterized surface, not proof that no signal exists. Health-fault
-clearing was not tested.
+Health-fault clearing was not tested.
 
 ## Validation record
 
