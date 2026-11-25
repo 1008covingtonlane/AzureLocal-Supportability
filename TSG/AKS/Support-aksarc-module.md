@@ -60,7 +60,7 @@ Use this guide on Azure Local 2311.2 or later when you see any of these problems
 
 - Azure Local 2311.2 or later, with the Moc PowerShell module that Azure Local installs on every machine.
 - Sign in directly to one machine of your Azure Local instance, at the console or with Remote Desktop, using your deployment user account or another account that is an administrator on every machine. Open Windows PowerShell as Administrator.
-- Don't run the module in a remote PowerShell session, such as `Enter-PSSession` or `Invoke-Command`. The test uses PowerShell remoting from the machine you're signed in to, to reach every machine in the instance that is Up. A remote session can't pass your sign-in on to those machines.
+- Don't run the module in a remote PowerShell session, such as `Enter-PSSession` or `Invoke-Command`. The test uses PowerShell remoting from the machine you're signed in to, to reach every machine in the instance that is Up. In a remote session, that machine usually can't pass your sign-in on to the other machines, so the test can't reach them and doesn't run.
 - PowerShell remoting (WinRM) must work from that machine to every machine in the instance that is Up. `Get-ClusterNode` shows the state of each machine.
 - Access to the PowerShell Gallery, directly or through your proxy. You need it to install the module, and each time the module loads it checks the gallery for a newer version.
 
@@ -75,7 +75,7 @@ Import-Module Support.AksArc
 
 ```
 
-`Install-Module` can ask you to install the NuGet provider, to trust the PSGallery repository, and to accept the module license. Answer Yes to each. When the module loads, it shows a disclaimer as a warning and checks the gallery for a newer version. Both are expected.
+`Install-Module` asks you to confirm installing from the PSGallery repository, which isn't trusted by default, and to accept the module license. Answer Yes to both. When the module loads, it shows a disclaimer as a warning and checks the gallery for a newer version. Both are expected.
 
 If the module was already installed, update it before you use it, so that you run the current tests:
 
@@ -98,7 +98,7 @@ Test-SupportAksArcKnownIssues
 
 ```
 
-The command checks, on every machine that is Up:
+The test takes about a minute on a three-machine instance. Version 1.3.164 of the module runs 23 tests. They check, on every machine that is Up:
 
 - the Failover Cluster and Hyper-V Virtual Machine Management services;
 - the MOC cloud agent, node agent, and host agent services, and whether MOC is on the latest patch of its version;
