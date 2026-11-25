@@ -62,6 +62,7 @@
 | 2026-11-25 | The manual alternative now lists the installed modules in a separate PowerShell process (a background job) and reads back only their names, versions, paths, and requirements. In Windows PowerShell 5.1, listing them in the block's own session loaded the newest installed version of a module that another module names in `NestedModules`, and the block then stopped with `The module became loaded. No versions will be removed.` on every run, even when a version that it keeps met that entry. If the separate listing fails, the block stops with `No changes were made`. The check for the recipe-aware helper now looks only in `AzureLocalImageModule` (`Get-Command -Name Remediate-PSModules -Module AzureLocalImageModule`), as the import and helper blocks do, instead of searching every module. |
 | 2026-11-25 | When a check before the recipe-aware helper fails, the article now says that the manual alternative is for nodes without the helper and stops on a node that has it, with `Use the recipe-aware helper instead of the manual alternative.`, and that this message does not mean the helper is safe to run. Before, it pointed to the manual alternative as if it could run there. |
 | 2026-11-25 | Moved the record of the lab tests from the Validation row at the top of the article to [Validation record](#validation-record) at the end, unchanged. The Validation row now gives a short summary and links to it. |
+| 2026-11-25 | In the per-node view of the last system health check in [Symptoms](#symptoms), a node that has no entry, or an entry without a `Detail`, now goes to the read-only check in [Issue validation](#issue-validation). The article no longer says why an entry can be missing. |
 
 ## Overview
 
@@ -130,8 +131,8 @@ Expected result: one entry per node. A node with `Status : FAILURE` needs the st
 
 While a health check is running, the first line shows `InProgress` with a completion time of
 `01/01/0001` and no entries are listed; run the block again after it finishes. If a completed health
-check returns no entry, it did not evaluate this check; use the read-only check in
-[Issue validation](#issue-validation) on each node instead.
+check returns no entry for a node, or an entry without a `Detail`, use the read-only check in
+[Issue validation](#issue-validation) on that node instead.
 
 
 ## Issue Validation
