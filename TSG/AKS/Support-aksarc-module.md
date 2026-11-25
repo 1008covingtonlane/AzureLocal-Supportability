@@ -48,12 +48,12 @@ Use this guide on Azure Local 2311.2 or later when you see any of these problems
 | Admin surface | Status | What you see |
 | --- | --- | --- |
 | PowerShell on an Azure Local machine | Shown | `Test-SupportAksArcKnownIssues` lists each test with its status and a message. This is the only place the module reports its results. |
-| Azure portal | Shown | The problems the module targets can show as a failed solution update on the **Updates** page of your Azure Local instance, or as an Azure Arc resource bridge whose status is **Offline**. The module's own test results don't appear in the portal. |
-| Windows Failover Cluster Manager | Shown | When the MOC cloud agent isn't running, the `MOC Cloud Agent Service` resource in the cloud agent role isn't **Online**. Other test results don't appear there. |
+| Azure portal | Not evident | The module's results don't appear in the portal, and the system health check on the **Updates** page doesn't run these tests, so a passing health check doesn't rule out these problems. You may only see their effects, such as a failed solution update or an Azure Arc resource bridge whose status is **Offline**. |
+| Windows Failover Cluster Manager | Shown | For one test only: `Validate MOC Cloud Agent Running` fails when the `MOC Cloud Agent Service` resource in the MOC cloud agent role isn't **Online**, which Failover Cluster Manager shows under **Roles**. Other test results don't appear there. |
 | Windows event logs | Not evident | The module doesn't write its results to any Windows event log. |
 | Cluster logs (Get-ClusterLog) | Not evident | The module doesn't write its results to the cluster log. |
-| Windows Admin Center (standalone host) | Not evident | Windows Admin Center doesn't run these tests or show their results. |
-| Windows Admin Center in the Azure portal | Not evident | Windows Admin Center in the Azure portal doesn't run these tests or show their results. |
+| Windows Admin Center (standalone host) | Not evident | Windows Admin Center doesn't run these tests or show their results. The problems don't raise a Health Service fault, so its alerts don't list them. |
+| Windows Admin Center in the Azure portal | Not evident | Windows Admin Center in the Azure portal doesn't run these tests or show their results. The problems don't raise a Health Service fault, so its alerts don't list them. |
 | Component / tool log files (on disk) | Not evident | The module doesn't write a log file. To keep a record, start a transcript as shown in [Support](#support). |
 
 ## Prerequisites
