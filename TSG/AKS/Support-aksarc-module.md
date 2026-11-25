@@ -60,6 +60,7 @@ Use this guide on Azure Local 2311.2 or later when you see any of these problems
 
 - Azure Local 2311.2 or later, with the Moc PowerShell module that Azure Local installs on every machine.
 - Sign in directly to one machine of your Azure Local instance, at the console or with Remote Desktop, using your deployment user account or another account that is an administrator on every machine. Open Windows PowerShell as Administrator.
+- Run every command in this guide in Windows PowerShell 5.1 (`powershell.exe`), not in PowerShell 7 (`pwsh.exe`), which Azure Local machines also have. The module doesn't work correctly in PowerShell 7: the test reports a Failover Cluster service failure that isn't real. To check which one you're in, run `$PSVersionTable.PSEdition`. It must return `Desktop`; `Core` means PowerShell 7.
 - Don't run the module in a remote PowerShell session, such as `Enter-PSSession` or `Invoke-Command`. The test uses PowerShell remoting from the machine you're signed in to, to reach every machine in the instance that is Up. In a remote session, that machine usually can't pass your sign-in on to the other machines, so the test can't reach them and doesn't run.
 - PowerShell remoting (WinRM) must work from that machine to every machine in the instance that is Up. `Get-ClusterNode` shows the state of each machine.
 - Access to the PowerShell Gallery, directly or through your proxy. You need it to install the module, and each time the module loads it checks the gallery for a newer version.
@@ -75,7 +76,7 @@ Import-Module Support.AksArc
 
 ```
 
-`Install-Module` asks you to confirm installing from the PSGallery repository, which isn't trusted by default, and to accept the module license. Answer Yes to both. When the module loads, it shows a disclaimer as a warning and checks the gallery for a newer version. Both are expected.
+`Install-Module` asks you to confirm installing from the PSGallery repository, which isn't trusted by default, and to accept the module license. Answer Yes to both. When the module loads, it prints `Checking if you are on the latest version`, a warning that some commands from the module `Common` use unapproved verbs, and a disclaimer that starts with `THE SOFTWARE IS PROVIDED "AS IS"`. These are expected.
 
 If the module was already installed, update it before you use it, so that you run the current tests:
 
@@ -107,7 +108,7 @@ The test takes about a minute on a three-machine instance. Version 1.3.164 of th
 - VMs and gallery images that failed to delete, and the user storage containers;
 - the Windows Event Log service.
 
-It only reports what it finds. It doesn't fix anything. Machines that are Down or Paused aren't checked.
+It only reports what it finds. It doesn't fix anything. Machines that are Down or Paused aren't checked. While it runs, it also prints many `VERBOSE:` progress lines. They're expected.
 
 The output lists each test with its `Test Name`, its `Status`, and a `Message`, and ends with a summary line. For example output, see [Use the Support tool to troubleshoot and fix Azure Local infrastructure problems](https://learn.microsoft.com/azure/azure-local/manage/remediate-support-tool-infrastructure). Use this table to decide what to do next:
 
@@ -115,7 +116,8 @@ The output lists each test with its `Test Name`, its `Status`, and a `Message`, 
 | --- | --- | --- |
 | Every test shows `Passed`, followed by `All tests passed successfully.` | The module found no known issue. | Don't run the remediation command. If you still have a problem, see [Support](#support). |
 | One or more tests show `Failed` or `Error`, followed by `Some tests failed. Run Invoke-SupportAksArcRemediation to remediate issues.` | The module found a known issue, or a test couldn't finish. | Run the remediation command in the next section. |
-| No table, and the error `Critical Test <test name> failed: <message>` | A critical check failed. The module stops, because the later results can't be trusted. | Run the remediation command in the next section. |
+| No table, and the error `Critical Test Failover Cluster service not responsive or not running failed: Failover Cluster service is not running on node: <machine>. Exception: A parameter cannot be found that matches parameter name 'ComputerName'.` | You ran the test in PowerShell 7. The result isn't valid. | Don't run the remediation command. Open Windows PowerShell 5.1 as described in [Prerequisites](#prerequisites), and run the test again. |
+| No table, and any other error `Critical Test <test name> failed: <message>` | A critical check failed. The module stops, because the later results can't be trusted. | Run the remediation command in the next section. |
 | The error `Please ensure you are running this script directly on the host and not over remote powershell` | The module couldn't reach every machine that is Up over PowerShell remoting. It ran no tests. | Don't run the remediation command. Sign in directly to a machine as described in [Prerequisites](#prerequisites). If you already did, fix PowerShell remoting to the machine named in the error `Remote PowerShell is not available on node: <machine>`, and then run the test again. |
 | Tests show only `Passed` or `Warning`, followed by `Tests completed with warnings. Review warning details before remediation.` | The module found a condition to review, such as no isolated user storage container. | Read the `Message` of each `Warning` test and follow it. The remediation command doesn't change anything for a warning. |
 
