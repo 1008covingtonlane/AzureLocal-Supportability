@@ -1,20 +1,90 @@
+<!-- tsg-metadata
+{
+  "schema": "azure-local-supportability/tsg-metadata/v1",
+  "document_type": "troubleshoot",
+  "products": ["Azure Local", "Azure Local VMs", "AKS enabled by Azure Arc"],
+  "detector": {"type": "command", "signal": "Test-SupportAksArcKnownIssues"},
+  "validation": {
+    "fidelity_level": "L0",
+    "technical_grade": null,
+    "reproduction_substrate": "vm",
+    "automation_status": "scaffold",
+    "last_validated": "2026-11-25",
+    "spec_ref": "AzLocal_AKSArc_SupportModule_KnownIssues"
+  }
+}
+-->
+
 # Support.AksArc Module Troubleshooting Guide
 
 The Support.AksArc PowerShell module provides diagnostic and remediation capabilities for Azure Kubernetes Service on Azure Arc environments.
 
+It checks the infrastructure that Azure Local VMs and AKS enabled by Azure Arc run on, mostly Microsoft On-Premises Cloud (MOC). MOC is the Azure Local service layer that creates and manages those VMs and their disks, networks, and images. The module can fix many of the known issues it finds.
+
+## Table of contents
+
+- [Symptoms](#symptoms)
+- [Where these problems appear](#where-these-problems-appear)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+- [Commands](#commands)
+- [Support](#support)
+
+## Symptoms
+
+Use this guide on Azure Local 2311.2 or later when you see any of these problems:
+
+- Azure Local VM or AKS Arc operations fail, for example creating, changing, or deleting a VM.
+- A solution update fails in the MOC binaries stage or in the Azure Arc resource bridge stage.
+- The MOC service doesn't stay online.
+- Azure Arc resource bridge, the appliance that lets Azure manage your VMs, is offline.
+
+**Severity:** depends on the failing test. A failed test can block Azure Local VM and AKS Arc operations or a solution update. The module checks the MOC infrastructure only; it doesn't check hardware, storage, or network faults.
+
+**Who runs it:** an Azure Local administrator. If the module doesn't fix the problem, contact Microsoft Support.
+
+## Where these problems appear
+
+| Admin surface | Status | What you see |
+| --- | --- | --- |
+| PowerShell on an Azure Local machine | Shown | `Test-SupportAksArcKnownIssues` lists each test with its status and a message. This is the only place the module reports its results. |
+| Azure portal | Shown | The problems the module targets can show as a failed solution update on the **Updates** page of your Azure Local instance, or as an Azure Arc resource bridge whose status is **Offline**. The module's own test results don't appear in the portal. |
+| Windows Failover Cluster Manager | Shown | When the MOC cloud agent isn't running, the `MOC Cloud Agent Service` resource in the cloud agent role isn't **Online**. Other test results don't appear there. |
+| Windows event logs | Not evident | The module doesn't write its results to any Windows event log. |
+| Cluster logs (Get-ClusterLog) | Not evident | The module doesn't write its results to the cluster log. |
+| Windows Admin Center (standalone host) | Not evident | Windows Admin Center doesn't run these tests or show their results. |
+| Windows Admin Center in the Azure portal | Not evident | Windows Admin Center in the Azure portal doesn't run these tests or show their results. |
+| Component / tool log files (on disk) | Not evident | The module doesn't write a log file. To keep a record, start a transcript as shown in [Support](#support). |
+
 ## Prerequisites
 
-- PowerShell 5.1+, Administrator privileges, Moc module, Azure Stack HCI
+- Azure Local 2311.2 or later, with the Moc PowerShell module that Azure Local installs on every machine.
+- Sign in directly to one machine of your Azure Local instance, at the console or with Remote Desktop, using your deployment user account or another account that is an administrator on every machine. Open Windows PowerShell as Administrator.
+- Don't run the module in a remote PowerShell session, such as `Enter-PSSession` or `Invoke-Command`. The test connects from the machine you're signed in to, to every machine in the instance whose state is Up, by using PowerShell remoting. A remote session can't pass your sign-in on to those machines.
+- PowerShell remoting (WinRM) must work from that machine to every machine in the instance that is Up. `Get-ClusterNode` shows the state of each machine.
+- Access to the PowerShell Gallery, directly or through your proxy. You need it to install the module, and each time the module loads it checks the gallery for a newer version.
 
 ## Installation
 
-**Changes:** installs the Support.AksArc module from the PowerShell Gallery and loads it into the current PowerShell session.
+**Changes:** installs the Support.AksArc module from the PowerShell Gallery and loads it into the current PowerShell session. It doesn't change Azure Local, MOC, or your workloads.
 
 ```powershell
 Install-Module -Name Support.AksArc
 
 Import-Module Support.AksArc
 
+```
+
+`Install-Module` can ask you to install the NuGet provider, to trust the PSGallery repository, and to accept the module license. Answer Yes to each. When the module loads, it shows a disclaimer as a warning and checks the gallery for a newer version. Both are expected.
+
+If the module was already installed, update it before you use it, so that you run the current tests:
+
+**Changes:** replaces the installed Support.AksArc module with the newest version from the PowerShell Gallery and reloads it.
+
+```powershell
+Remove-Module -Name Support.AksArc -ErrorAction SilentlyContinue
+Update-Module -Name Support.AksArc
+Import-Module -Name Support.AksArc
 ```
 
 ## Commands 
@@ -28,24 +98,72 @@ Test-SupportAksArcKnownIssues
 
 ```
 
-The output lists each test with its `Status`, `Passed` or `Failed`, and a message. For example output, see [Use the Support tool to troubleshoot and fix Azure Local infrastructure problems](https://learn.microsoft.com/azure/azure-local/manage/remediate-support-tool-infrastructure).
+The command checks, on every machine that is Up:
 
-- If every test shows `Passed` and the command reports no error, the module found no known issue. Do not run the remediation command. If you still have a problem, see [Support](#support).
-- If any test shows `Failed`, or the command reports an error, run the remediation command in the next section.
+- the Failover Cluster and Hyper-V Virtual Machine Management services;
+- the MOC cloud agent, node agent, and host agent services, and whether MOC is on the latest patch of its version;
+- MOC certificates and tokens, MOC PowerShell settings, and the cloud agent placement rule;
+- whether the MOC machines match the cluster machines and are active;
+- VMs and gallery images that failed to delete, and the user storage containers;
+- the Windows Event Log service.
+
+It only reports what it finds. It doesn't fix anything. Machines that are Down or Paused aren't checked.
+
+The output lists each test with its `Test Name`, its `Status`, and a `Message`, and ends with a summary line. For example output, see [Use the Support tool to troubleshoot and fix Azure Local infrastructure problems](https://learn.microsoft.com/azure/azure-local/manage/remediate-support-tool-infrastructure). Use this table to decide what to do next:
+
+| What you see | What it means | What to do |
+| --- | --- | --- |
+| Every test shows `Passed`, followed by `All tests passed successfully.` | The module found no known issue. | Don't run the remediation command. If you still have a problem, see [Support](#support). |
+| One or more tests show `Failed` or `Error`, followed by `Some tests failed. Run Invoke-SupportAksArcRemediation to remediate issues.` | The module found a known issue, or a test couldn't finish. | Run the remediation command in the next section. |
+| No table, and the error `Critical Test <test name> failed: <message>` | A critical check failed. The module stops, because the later results can't be trusted. | Run the remediation command in the next section. |
+| The error `Please ensure you are running this script directly on the host and not over remote powershell` | The module couldn't reach every machine that is Up over PowerShell remoting. It ran no tests. | Don't run the remediation command. Sign in directly to a machine as described in [Prerequisites](#prerequisites). If you already did, fix PowerShell remoting to the machine named in the error `Remote PowerShell is not available on node: <machine>`, and then run the test again. |
+| Tests show only `Passed` or `Warning`, followed by `Tests completed with warnings. Review warning details before remediation.` | The module found a condition to review, such as no isolated user storage container. | Read the `Message` of each `Warning` test and follow it. The remediation command doesn't change anything for a warning. |
 
 ### Test for issues with remediation
 
-Run this command only when the test above reported a failed test or an error. It fixes the known issues that have a remediation.
+Run this command only when the test above reported a `Failed` or `Error` test, or the `Critical Test` error. It reruns every test and fixes only the tests that don't pass.
 
-**Changes:** applies the module's fixes for the known issues that it finds. These fixes can update infrastructure components, such as Microsoft On-Premises Cloud (MOC).
+**Changes:** depending on the failing test, the fix can:
+
+- update MOC to the latest patch of its current version;
+- stop and start the MOC cloud agent role and the MOC node agent and host agent services on every machine, and renew MOC identities and certificates;
+- delete stale MOC working folders, and reset MOC PowerShell settings to the standard Azure Local values;
+- re-create the MOC PowerShell registry setting or the cloud agent cluster affinity rule `Cloud Agent-CNO`;
+- start the Windows Event Log service;
+- remove gallery images that failed to delete, and stop and remove VMs that failed to delete because their OS disk was in use.
+
+It doesn't restart the Failover Cluster service or the Hyper-V Virtual Machine Management service.
+
+**Plan for:** Azure Local VM and AKS Arc management operations, such as creating, changing, or deleting a VM, can fail while MOC agents restart or MOC updates. Apart from removing VMs that failed to delete, the fixes work on the MOC infrastructure, not on running VMs. Machines that are Down or Paused aren't fixed. Run the command in a maintenance window.
+
+> [!WARNING]
+> The module doesn't undo its fixes. An MOC update stays in place. If the test `Validate Virtual Machine Stuck In Deleting Due To OS Disk Lock` failed, the fix stops and removes every VM that its message lists. Before you run the command, read that message and confirm that you meant to delete those VMs.
 
 ```powershell
 Invoke-SupportAksArcRemediation
 
 ```
 
-Then run `Test-SupportAksArcKnownIssues` again and confirm that every test shows `Passed` and that the command reports no error. If any test still shows `Failed`, or the error remains, see [Support](#support).
+For each test, the command prints `No remediation required for <test>.`, or `Remediation for <test> is required.` followed by `succeeded.` or `failed.` Some tests have no automatic fix. For those, the command prints `Auto Remediation not available. Please Restart the Node manually, which has the issue` and still reports success, but it changed nothing. Restart the machine named in the test message as described in [Suspend and resume Azure Local machines for maintenance](https://learn.microsoft.com/azure/azure-local/manage/suspend-resume-cluster-maintenance), or contact Microsoft Support.
+
+To fix one test only, run `Invoke-SupportAksArcRemediation -TestId <ID>`. The test command shows each ID in its `Running test: <test name> with ID: <ID>` line.
+
+### Verify the fix
+
+Run `Test-SupportAksArcKnownIssues` again. Confirm that every test shows `Passed`, that the summary line is `All tests passed successfully.`, and that the command reports no error. If any test still shows `Failed` or `Error`, or the error remains, see [Support](#support).
 
 
 ## Support
 Review Azure Local  documentation or contact Microsoft Support for unresolved issues.
+
+When you contact Microsoft Support, include the full console output of both commands, the Support.AksArc module version, and your Azure Local version. To save the console output to a file, start a transcript before you run the commands, and stop it afterward:
+
+**Changes:** writes a transcript file to your Desktop. It doesn't change Azure Local.
+
+```powershell
+Start-Transcript -Path "$env:USERPROFILE\Desktop\Support-AksArc-$(Get-Date -Format yyyyMMdd-HHmmss).txt"
+Get-Module -Name Support.AksArc | Select-Object Name, Version
+Get-SolutionUpdateEnvironment | Select-Object CurrentVersion
+Test-SupportAksArcKnownIssues
+Stop-Transcript
+```
