@@ -79,19 +79,19 @@ $leftoverFolders = @(Get-ChildItem -Path $tempPath -Recurse -Filter 'AzStackHci.
     Where-Object { $_.Name -match $randomFileNameRegex } |
     Sort-Object -Property FullName -Unique)
 $olderThanOneDay = @($leftoverFolders | Where-Object { ((Get-Date) - $_.LastWriteTime).TotalDays -ge 1 })
-$leftoverBytes = ($leftoverFolders | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Recurse -File -Force -ErrorAction SilentlyContinue } | Measure-Object -Property Length -Sum).Sum
+$removableBytes = ($olderThanOneDay | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Recurse -File -Force -ErrorAction SilentlyContinue } | Measure-Object -Property Length -Sum).Sum
 [pscustomobject]@{
     Node              = $env:COMPUTERNAME
     LeftoverFolders   = $leftoverFolders.Count
     OlderThanOneDay   = $olderThanOneDay.Count
-    LeftoverSizeGB    = [math]::Round(($leftoverBytes / 1GB), 2)
+    RemovableSizeGB   = [math]::Round(($removableBytes / 1GB), 2)
     SystemDriveFreeGB = [math]::Round(((Get-PSDrive -Name 'C').Free / 1GB), 2)
 }
 ```
 
 The script counts only the leftover folders that [Mitigation Details](#mitigation-details) can remove: random-named folders that contain an `AzStackHci.EnvironmentChecker.*` folder. It does not count the `AzStackHci.EnvironmentChecker.NugetsForUpdate` folder. It changes nothing.
 
-- If `OlderThanOneDay` is more than `0`, this issue is present on the node. Note `LeftoverSizeGB` and `SystemDriveFreeGB`, and continue with [Mitigation Details](#mitigation-details) on this node.
+- If `OlderThanOneDay` is more than `0`, this issue is present on the node. `RemovableSizeGB` is the space that the mitigation frees. Note it and `SystemDriveFreeGB`, and continue with [Mitigation Details](#mitigation-details) on this node.
 - If `OlderThanOneDay` is `0` and `LeftoverFolders` is `0`, this issue is not present on the node. Do not continue.
 - If `OlderThanOneDay` is `0` but `LeftoverFolders` is more than `0`, the folders were changed in the last day and a running update can still be using them. Do not remove them now; run the script again tomorrow.
 
@@ -134,7 +134,7 @@ foreach ($tnf in $tempNugetFolders)
 }
 ```
 
-Expected output:
+Expected output (no output means that the script found no `AzStackHci.EnvironmentChecker.*` folders):
 
 - One `Removing temp nuget folder <folder>` line for each folder that it deletes.
 - `Skipping removal of temp nuget folder <folder> as it does not match expected pattern.` means the script found an `AzStackHci.EnvironmentChecker.*` folder whose parent folder does not have a random name, and left it alone. On current builds you see this line for the TEMP folder itself and for `AzStackHci.EnvironmentChecker.NugetsForUpdate`. Neither one is removed.
@@ -148,7 +148,7 @@ This is the same rule that current builds use to remove these folders automatica
 Run the [Issue Validation](#issue-validation) script again on the same node, or on every node with `Invoke-Command` as described there.
 
 - `OlderThanOneDay` is `0`.
-- `SystemDriveFreeGB` is higher than before, by about the `LeftoverSizeGB` value that you noted.
+- `SystemDriveFreeGB` is higher than before, by about the `RemovableSizeGB` value that you noted.
 
 If `OlderThanOneDay` is still more than `0`, run the mitigation script again and read its red `Unable to remove` lines. Repeat [Issue Validation](#issue-validation) and [Mitigation Details](#mitigation-details) on each remaining node.
 
