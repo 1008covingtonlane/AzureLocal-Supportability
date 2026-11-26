@@ -44,7 +44,7 @@
 | Date | Summary |
 | --- | --- |
 | 2026-11-20 | Corrected the expected inbox module path and the Issue Validation command. Added the error that newer builds show, steps for module files that are still in use, commands for all machines, and guidance to verify, escalate, and prevent the problem. Added the metadata marker. Step 1 now lists every PowerShell session that could hold the external copy's files, including remote sessions, and the impact labels are replaced with plain statements of what each step changes. |
-| 2026-11-26 | Step 1 now uses Windows Restart Manager to list the exact processes that hold the external copy's files, and Step 2 stops only the PowerShell sessions in that list, after you review it. The cleanup and leftover-folder scripts now print a one-line result, the restart for files that stay in use is its own step, and a solution update that failed during installation can be resumed with one command after the fix is verified. |
+| 2026-11-26 | Corrected the statement that Windows cannot report which process holds the module's files: Step 1 now uses Windows Restart Manager to list the exact processes, and Step 2 stops only the PowerShell sessions in that list, after you review it. Every script now prints a result line. Step 5 checks whether a restart is needed and prints how to restart the machine safely. Verify the fix checks every machine, and a solution update that failed during installation can be resumed with one script once every machine is clean. |
 
 ## At a glance
 
@@ -104,7 +104,7 @@ The system health check (`Invoke-SolutionUpdatePrecheck -SystemHealth`) runs the
 | PowerShell Gallery | The public online repository that `Install-Module` downloads PowerShell modules from. |
 | In use | A process, usually a PowerShell window or remote session, still has files from the external copy loaded, so Windows does not allow them to be deleted. |
 | Restart Manager | A built-in Windows component that reports which processes hold a file. [Step 1](#step-1-find-the-processes-that-hold-the-external-copys-files) uses it to name the exact processes that keep the external copy's files in use. |
-| Result line | The first line that a script in this article prints, in capital letters, for example `NO_LOCKING_SESSIONS`. Each step says what to do for each result line. |
+| Result line | A line in capital letters, for example `NO_LOCKING_SESSIONS`, that a script in this article prints to report its result. Each step says what each result line means and what to do next. |
 
 ## Where you can see this problem
 
@@ -169,7 +169,7 @@ How to read the output for each machine:
 | `EXTERNAL_COPY_FOUND` | `ExternalCopies` lists a path | An external copy is present. | Follow Steps 1 to 6 in [Mitigation Details](#mitigation-details). |
 | `LEFTOVER_FOLDER_ONLY` | `ExternalCopies` is empty but `VersionFolders` lists a folder | A leftover folder from a partly removed copy. It no longer loads. | Follow Steps 1 to 6. Step 4 has nothing to uninstall, and Step 6 deletes the folder. If Step 6 already told you to leave it until the next planned restart, no further action is needed now. |
 | `NOT_AFFECTED` | Both are empty and `AllAvailableModules` shows only the inbox path | This machine is not affected. | None. |
-| `INBOX_MODULE_MISSING` | `AllAvailableModules` does not show the inbox path | The inbox module is missing. | Stop and [contact Microsoft support](#when-to-contact-microsoft-support). Do not install a replacement. The scripts in this article change nothing on a machine without the inbox module. |
+| `INBOX_MODULE_MISSING` | `AllAvailableModules` does not show the inbox path | The inbox module is missing. | Stop and [contact Microsoft support](#when-to-contact-microsoft-support). Do not install a replacement. The cleanup scripts in Steps 4 and 6 remove nothing on a machine without the inbox module, and the retry script retries nothing. |
 
 ## Mitigation Details
 
@@ -698,7 +698,7 @@ Run this script on one machine. It first runs the same check as [Verify the fix]
 
 ## Rollback
 
-Normally there is nothing to roll back. A copy installed from the PowerShell Gallery was not part of Azure Local, and a copy left behind by deployment is removed by Azure Local itself before each operation. If you need the standalone Environment Checker from the PowerShell Gallery again, reinstall it with `Install-Module -Name AzStackHci.EnvironmentChecker` after the operation completes, and remove it again before the next one. If you paused and drained a machine, resume it as described in the pause and drain procedure. Sessions that Step 2 stopped cannot be restored; open new PowerShell sessions if you still need them.
+Normally there is nothing to roll back. A copy installed from the PowerShell Gallery was not part of Azure Local, and a copy left behind by deployment is removed by Azure Local itself before each operation. If you need the standalone Environment Checker from the PowerShell Gallery again, install it only after the operation completes, and remove it again before the next one, as described in [Prevention](#prevention). If you paused and drained a machine, resume it as described in the pause and drain procedure. Sessions that Step 2 stopped cannot be restored; open new PowerShell sessions if you still need them.
 
 ## When to contact Microsoft support
 
@@ -720,14 +720,7 @@ Include this information:
 
 ## Prevention
 
-Azure Local already includes the Environment Checker. If you install it from the PowerShell Gallery to run readiness checks, close that PowerShell window when you finish, then remove the gallery copy from every machine before you start a deployment or update, as described in [Assess your environment with the Environment Checker](https://learn.microsoft.com/azure/azure-local/manage/use-environment-checker).
-
-**Changes:** unloads the module from the current session and uninstalls only copies in version-number folders. The inbox module is not affected.
-
-```powershell
-Remove-Module AzStackHci.EnvironmentChecker -Force
-Get-Module AzStackHci.EnvironmentChecker -ListAvailable | Where-Object {$_.Path -like "*$($_.Version)*"} | Uninstall-Module -Force
-```
+Azure Local already includes the Environment Checker, so you do not need the PowerShell Gallery copy on its machines. If you install it from the PowerShell Gallery to run readiness checks, as described in [Assess your environment with the Environment Checker](https://learn.microsoft.com/azure/azure-local/manage/use-environment-checker), close that PowerShell window when you finish. Then, before you start a deployment, update, upgrade, add node, or repair node operation, remove the gallery copy from every machine with the cleanup script in [Step 4](#step-4-run-the-cleanup-script). Closing the window first matters: the module's .NET files stay in use until the PowerShell process that loaded them ends.
 
 ## Related documentation
 
