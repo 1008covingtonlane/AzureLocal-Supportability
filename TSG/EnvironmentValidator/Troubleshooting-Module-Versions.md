@@ -36,7 +36,7 @@
 | Date | Summary |
 | --- | --- |
 | 2026-11-20 | Corrected the expected inbox module path and the Issue Validation command. Added the error that newer builds show, steps for module files that are still in use, commands for all machines, and guidance to verify, escalate, and prevent the problem. Added the metadata marker. Step 1 now lists every PowerShell session that could hold the external copy's files, including remote sessions, and the impact labels are replaced with plain statements of what each step changes. |
-| 2026-11-26 | Corrected the statement that Windows cannot report which process holds the module's files: Step 1 now uses Windows Restart Manager to list the exact processes, Step 2 stops only the PowerShell sessions in that list, after you review it, and Step 3 asks you to close any other program in the list. Every script now prints a result line. Step 6 checks whether a restart is needed and prints how to restart the machine safely. Verify the fix checks every machine that it can reach and names any machine that it cannot reach, and a solution update that failed during installation can be resumed with one script once the machines are clean. Added that deployment and updates can leave copies behind, that Azure Local removes extra copies only on the machine where the Orchestrator Service is running, and that the scripts need a full language PowerShell session. |
+| 2026-11-26 | Step 1 now names the exact processes that hold the files, Step 2 stops only the user PowerShell sessions from that reviewed list while no update is running, and new scripts check every reachable machine and resume an update that failed with this error. |
 
 ## At a glance
 
@@ -48,7 +48,7 @@
 | Is it a network, hardware, or OEM problem? | No. The older error mentions `ValidateConnectivity`, but no network, firmware, or driver change is needed. |
 | Who should act | An administrator with local administrator rights on every machine. |
 | Time to fix | About 10 minutes, plus the time to retry the operation. |
-| Impact | The fix removes only the extra copy and, after you review the list, stops only the PowerShell sessions that hold its files. If another program holds them, [Step 3](#step-3-close-the-other-programs-that-hold-the-files) asks you to close it. Running VMs are not affected. No restart or maintenance window is needed, except in the rare case described in [Step 6](#step-6-check-whether-a-restart-is-needed). On a single-machine instance, that restart stops all VMs. |
+| Impact | The fix removes only the extra copy and, after you review the list, stops only the user PowerShell sessions that hold its files. It never stops services or system processes. If another program holds them, [Step 3](#step-3-close-the-other-programs-that-hold-the-files) asks you to close it. Running VMs are not affected. No restart or maintenance window is needed, except in the rare case described in [Step 6](#step-6-check-whether-a-restart-is-needed). On a single-machine instance, that restart stops all VMs. |
 | First step | Run the check in [Issue Validation](#issue-validation). |
 
 ## Overview
@@ -111,8 +111,8 @@ The system health check (`Invoke-SolutionUpdatePrecheck -SystemHealth`) runs the
 ## Before you start
 
 - Open PowerShell with **Run as administrator** on each machine.
-- Make sure no update or deployment step is running right now. If an update shows `Installing`, wait for it to stop before you change anything.
-- Use a PowerShell session in full language mode: `$ExecutionContext.SessionState.LanguageMode` returns `FullLanguage`. This is the default on Azure Local, including when Application Control is enforced. In a constrained session, Steps 1 and 4 report `LOCK_CHECK_UNAVAILABLE`, and some of the later scripts stop with an error.
+- Make sure no update or deployment step is running right now. Step 2 checks this for solution updates and stops nothing while one is running.
+- Use Windows PowerShell 5.1 (`powershell.exe`), not PowerShell 7, in full language mode: `$ExecutionContext.SessionState.LanguageMode` returns `FullLanguage`. This is the default on Azure Local, including when Application Control is enforced. In a constrained session, Step 1 reports `LOCK_CHECK_UNAVAILABLE`, and some of the later scripts stop with an error.
 - Run [Issue Validation](#issue-validation) first. Continue only if it prints `EXTERNAL_COPY_FOUND` or `LEFTOVER_FOLDER_ONLY`.
 - If it prints `INBOX_MODULE_MISSING`, stop and [contact Microsoft support](#when-to-contact-microsoft-support). Do not install a replacement.
 
@@ -121,22 +121,19 @@ The system health check (`Invoke-SolutionUpdatePrecheck -SystemHealth`) runs the
 Run this in an elevated PowerShell session on each machine. It changes nothing. It lists external copies, meaning module copies whose path contains their version number, and leftover version-number folders, and its first line is the result.
 
 ```powershell
-$moduleName = "AzStackHci.EnvironmentChecker"
-$root = Join-Path $env:ProgramFiles "WindowsPowerShell\Modules\$moduleName"
-$available = @(Get-Module -Name $moduleName -ListAvailable)
-$external = @($available | Where-Object {$_.Path -like "*$($_.Version)*"})
-$versionFolders = @(Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -as [version] })
-if (@($available | Where-Object {$_.Path -notlike "*$($_.Version)*"}).Count -eq 0) {
-    Write-Output "INBOX_MODULE_MISSING"
-} elseif ($external.Count -gt 0) {
-    Write-Output "EXTERNAL_COPY_FOUND"
-} elseif ($versionFolders.Count -gt 0) {
-    Write-Output "LEFTOVER_FOLDER_ONLY"
-} else {
-    Write-Output "NOT_AFFECTED"
+& {
+    $moduleName = "AzStackHci.EnvironmentChecker"
+    $root = Join-Path $env:ProgramFiles "WindowsPowerShell\Modules\$moduleName"
+    $available = @(Get-Module -Name $moduleName -ListAvailable)
+    $external = @($available | Where-Object { $_.Path -like "*$($_.Version)*" })
+    $versionFolders = @(Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -as [version] })
+    if (@($available | Where-Object { $_.Path -notlike "*$($_.Version)*" }).Count -eq 0) { Write-Output "INBOX_MODULE_MISSING" }
+    elseif ($external.Count -gt 0) { Write-Output "EXTERNAL_COPY_FOUND" }
+    elseif ($versionFolders.Count -gt 0) { Write-Output "LEFTOVER_FOLDER_ONLY" }
+    else { Write-Output "NOT_AFFECTED" }
+    $external | Format-Table Name, Version, Path -AutoSize
+    $versionFolders | ForEach-Object { "Version-number folder: $($_.FullName)" }
 }
-$external | Format-Table Name, Version, Path -AutoSize
-$versionFolders | ForEach-Object { "Version-number folder: $($_.FullName)" }
 ```
 
 To check every machine at once, run this from one machine. It checks this machine and every other machine of the cluster that it can reach with PowerShell remoting, and prints one result for each machine. A machine that it cannot reach shows `Not checked from here`; run the single-machine check above on that machine. Before the cluster exists (during deployment), it checks only this machine, so run the single-machine check on each machine.
@@ -186,26 +183,31 @@ How to read the result for each machine. The all-machines check prints the same 
 
 ## Mitigation Details
 
-Run these steps in order on each affected machine. Each script checks or changes only the machine it runs on, is safe to run when it has nothing to do, and prints a result line. Step 3 has no script: it asks you to close programs that the scripts do not stop, and only when Step 1 finds one. None of the steps affects running VMs or needs a maintenance window, except the restart that [Step 6](#step-6-check-whether-a-restart-is-needed) can ask for on a single-machine instance.
+Run these steps in order on each affected machine, in one PowerShell window: Step 2 uses the list that Step 1 saves in that window. Each script checks or changes only the machine it runs on, is safe to run when it has nothing to do, and prints its result line first. Paste or run each block whole. None of the steps affects running VMs or needs a maintenance window, except the restart that [Step 6](#step-6-check-whether-a-restart-is-needed) can ask for.
 
 ### Step 1: Find the processes that hold the external copy's files
 
-This step changes nothing. It asks Windows Restart Manager which processes hold files in the external copy's version-number folders, and lists each one with its owner, sign-in session, start time, command line, and the Windows service it runs, if any. Windows Restart Manager reports these processes even though the module list that `Get-Process` shows does not include them, because PowerShell loads the module's .NET files in a way that is not listed there. Remote PowerShell sessions appear as `wsmprovhost`. Paste or run the whole block at once.
+This step changes nothing. It asks Windows Restart Manager which processes hold files in the external copy's version-number folders, lists each one with its owner, sign-in session, start time, Windows service, and command line, and says in `NextStep` what to do about it. `Get-Process` does not show these files, because PowerShell loads the module's .NET files in a way that it does not list. Remote PowerShell sessions appear as `wsmprovhost`.
+
+The script marks a process `Step 2 stops it.` only if it is a PowerShell process (`powershell`, `pwsh`, or `wsmprovhost`) that a person started: it does not run as SYSTEM, LocalService, NetworkService, or an account that runs a Windows service, does not run or belong to a Windows service, and is in a signed-in user's session. The only `wsmprovhost` processes that it marks are your own remote sessions. It saves those processes, by process ID and start time, for Step 2.
 
 ```powershell
-& {
-    $moduleRoot = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules\AzStackHci.EnvironmentChecker'
-    $sessionNames = 'powershell', 'pwsh', 'wsmprovhost'
-    $files = @(Get-ChildItem -Path $moduleRoot -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -as [version] } |
-        ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Recurse -File -Force -ErrorAction SilentlyContinue } |
-        ForEach-Object { $_.FullName })
-    $holderIds = @()
-    $checkError = $null
-    if ($files.Count -gt 0) {
-        try {
-            if (-not ('EnvCheckerFileHolders' -as [type])) {
-                Add-Type -ErrorAction Stop -TypeDefinition @'
+. {
+    $envCheckerReviewed = @()
+    if ($PSVersionTable.PSEdition -ne 'Desktop') {
+        Write-Output 'WINDOWS_POWERSHELL_REQUIRED'
+        Write-Output 'Run this in Windows PowerShell 5.1 (powershell.exe), not in PowerShell 7.'
+        return
+    }
+    function Get-EnvCheckerFileHolder {
+        $moduleRoot = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules\AzStackHci.EnvironmentChecker'
+        $files = @(Get-ChildItem -Path $moduleRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -as [version] } |
+            ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Recurse -File -Force -ErrorAction SilentlyContinue } |
+            ForEach-Object { $_.FullName })
+        if ($files.Count -eq 0) { return }
+        if (-not ('EnvCheckerFileHolders' -as [type])) {
+            Add-Type -ErrorAction Stop -TypeDefinition @'
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -258,306 +260,186 @@ public static class EnvCheckerFileHolders {
     }
 }
 '@
+        }
+        $holderIds = @([EnvCheckerFileHolders]::GetProcessIds([string[]]$files) | Sort-Object -Unique)
+        $services = @(Get-CimInstance -ClassName Win32_Service -ErrorAction Stop)
+        $servicePids = @($services | Where-Object { $_.ProcessId -gt 0 } | ForEach-Object { $_.ProcessId })
+        $serviceSids = @('S-1-5-18', 'S-1-5-19', 'S-1-5-20') + @($services | ForEach-Object {
+            try { ([System.Security.Principal.NTAccount]($_.StartName -replace '^\.\\', "$env:COMPUTERNAME\")).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { }
+        })
+        $mySid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        foreach ($id in $holderIds) {
+            $process = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $id" -ErrorAction SilentlyContinue
+            if (-not $process) { continue }
+            $name = $process.Name -replace '\.exe$', ''
+            $sid = (Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid -ErrorAction SilentlyContinue).Sid
+            $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwner -ErrorAction SilentlyContinue
+            $ownerName = if ($owner.User) { "$($owner.Domain)\$($owner.User)" } else { 'unknown' }
+            $parent = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $($process.ParentProcessId)" -ErrorAction SilentlyContinue
+            $hostsService = $servicePids -contains $id
+            $serviceParent = ($servicePids -contains $process.ParentProcessId) -or ($parent.Name -eq 'services.exe')
+            $userAccount = $sid -and ($serviceSids -notcontains $sid)
+            if ($name -eq 'wsmprovhost') { $canStop = $userAccount -and -not $hostsService -and ($sid -eq $mySid) }
+            elseif ('powershell', 'pwsh' -contains $name) { $canStop = $userAccount -and -not $hostsService -and -not $serviceParent -and ($process.SessionId -ne 0) }
+            else { $canStop = $false }
+            if ($id -eq $PID) { $canStop = $false; $next = 'This PowerShell window holds the files. Close it, open a new window, and start again at Step 1.' }
+            elseif ($canStop) { $next = 'Step 2 stops it.' }
+            elseif (-not $userAccount -or $hostsService -or ($serviceParent -and $name -ne 'wsmprovhost')) { $next = 'It runs as or for a Windows service. Leave it running; Step 5 removes what it can, and Step 6 says whether a restart is needed.' }
+            elseif ($process.SessionId -eq 0) { $next = "Ask $ownerName to close it or end their remote session. Never sign out session 0." }
+            else { $next = "Ask $ownerName to close it. If that is not possible, sign the user out with: logoff $($process.SessionId)" }
+            [pscustomobject]@{
+                ProcessId   = $id
+                Name        = $process.Name
+                Owner       = $ownerName
+                SessionId   = $process.SessionId
+                Service     = @($services | Where-Object { $_.ProcessId -eq $id } | ForEach-Object { $_.Name }) -join ', '
+                StartTime   = $process.CreationDate
+                CanStop     = $canStop
+                NextStep    = $next
+                CommandLine = $process.CommandLine
+                Key         = "$id|$(if ($process.CreationDate) { $process.CreationDate.ToString('o') })"
             }
-            $holderIds = @([EnvCheckerFileHolders]::GetProcessIds([string[]]$files))
         }
-        catch { $checkError = $_.Exception.Message }
     }
-    $services = @(Get-CimInstance -ClassName Win32_Service -Filter 'ProcessId > 0' -ErrorAction SilentlyContinue)
-    $rows = @(foreach ($id in @($holderIds | Sort-Object -Unique)) {
-        $process = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $id" -ErrorAction SilentlyContinue
-        if (-not $process) { continue }
-        $owner = (Get-Process -Id $id -IncludeUserName -ErrorAction SilentlyContinue).UserName
-        $serviceNames = @($services | Where-Object { $_.ProcessId -eq $id } | ForEach-Object { $_.Name })
-        $isSession = ($sessionNames -contains ($process.Name -replace '\.exe$', '')) -and ($serviceNames.Count -eq 0)
-        [pscustomobject]@{
-            ProcessId   = $id
-            Name        = $process.Name
-            Owner       = if ($owner) { $owner } else { 'unknown' }
-            SessionId   = $process.SessionId
-            Service     = $serviceNames -join ', '
-            StartTime   = $process.CreationDate
-            CanStop     = $isSession -and ($id -ne $PID)
-            NextStep    = if ($id -eq $PID) { 'This PowerShell window holds the files. Close it, open a new window, and start again at Step 1.' } elseif ($isSession) { 'Step 2 stops it.' } else { 'Step 2 does not stop it. See Step 3.' }
-            CommandLine = $process.CommandLine
-        }
-    })
+    $holders = @()
+    $checkError = $null
+    try { $holders = @(Get-EnvCheckerFileHolder) } catch { $checkError = $_.Exception.Message }
     if ($checkError) {
         Write-Output 'LOCK_CHECK_UNAVAILABLE'
         Write-Output "Restart Manager could not be used in this PowerShell session: $checkError"
         Write-Output 'These PowerShell processes are running. Any of them could hold the files:'
         Get-CimInstance -ClassName Win32_Process -ErrorAction SilentlyContinue |
-            Where-Object { $sessionNames -contains ($_.Name -replace '\.exe$', '') } |
-            Format-Table ProcessId, Name, CreationDate, CommandLine -AutoSize -Wrap
+            Where-Object { 'powershell.exe', 'pwsh.exe', 'wsmprovhost.exe' -contains $_.Name } |
+            Format-Table ProcessId, Name, SessionId, CreationDate, CommandLine -AutoSize -Wrap
     }
-    elseif ($rows.Count -gt 0) {
-        if (@($rows | Where-Object { -not $_.CanStop -and $_.ProcessId -ne $PID }).Count -gt 0) { Write-Output 'OTHER_HOLDERS_FOUND' }
-        else { Write-Output 'LOCKING_SESSIONS_FOUND' }
-        $rows | Format-List ProcessId, Name, Owner, SessionId, Service, StartTime, NextStep, CommandLine
+    elseif ($holders.Count -eq 0) {
+        Write-Output 'NO_LOCKING_SESSIONS'
+        Write-Output "No process holds files in the external copy's version-number folders."
     }
     else {
-        Write-Output 'NO_LOCKING_SESSIONS'
-        Write-Output "No process holds files in the external copy's version-number folders ($($files.Count) files checked)."
+        if (@($holders | Where-Object { -not $_.CanStop -and $_.ProcessId -ne $PID }).Count -gt 0) { Write-Output 'OTHER_HOLDERS_FOUND' }
+        else { Write-Output 'LOCKING_SESSIONS_FOUND' }
+        $envCheckerReviewed = @($holders | Where-Object { $_.CanStop } | ForEach-Object { $_.Key })
+        $holders | Format-List ProcessId, Name, Owner, SessionId, Service, StartTime, NextStep, CommandLine
     }
 }
 ```
 
-The first line of the output is the result:
-
 | Result | Meaning | Next step |
 | --- | --- | --- |
-| `LOCKING_SESSIONS_FOUND` | Only PowerShell sessions hold files from the external copy. `NextStep` says which ones Step 2 stops. Check each `Owner` and `CommandLine` before you continue. | Go to Step 2. |
-| `OTHER_HOLDERS_FOUND` | At least one listed process is not a PowerShell session, or it runs a Windows service, so Step 2 does not stop it. Its `NextStep` is `Step 2 does not stop it. See Step 3.` The list can also include PowerShell sessions, which Step 2 stops. | Go to Step 2, then Step 3. |
-| `NO_LOCKING_SESSIONS` | No process holds the files. | Go to Step 2. It has nothing to stop. |
-| `LOCK_CHECK_UNAVAILABLE` | Windows did not allow the Restart Manager check to run in this PowerShell session, so the script lists every PowerShell process instead, and Step 2 stops nothing. The cleanup in Step 5 still removes the copy's module manifest, so the copy stops loading even if some files stay in use. | Go to Step 2. |
+| `LOCKING_SESSIONS_FOUND` | Only PowerShell sessions that Step 2 stops hold the files. Check each `Owner` and `CommandLine` before you continue. | Go to Step 2. |
+| `OTHER_HOLDERS_FOUND` | At least one listed process is one that Step 2 does not stop. Its `NextStep` says what to do. | Go to Step 2, then Step 3. |
+| `NO_LOCKING_SESSIONS` | No process holds the files. | Go to Step 5. |
+| `LOCK_CHECK_UNAVAILABLE` | Restart Manager could not run in this session, so the script lists every PowerShell process instead, and Step 2 stops nothing. The cleanup in Step 5 still removes the copy's module manifest, so the copy stops loading even if some files stay in use. | Close the listed PowerShell windows and remote sessions that you or your team opened, then go to Step 5. |
+| `WINDOWS_POWERSHELL_REQUIRED` | The script ran in PowerShell 7 and checked nothing. | Open Windows PowerShell 5.1 as administrator and run Step 1 again. |
 
 ### Step 2: Stop the PowerShell sessions that hold the files
 
-Run this after you have read the Step 1 list. The script runs the same check as Step 1 and stops only the processes that the check finds at that moment and that Step 1 marks `Step 2 stops it.` When no PowerShell session holds the files, it stops nothing. Paste or run the whole block at once.
+Run this in the same window, after you have read the Step 1 list. It stops a process only if Step 1 marked it `Step 2 stops it.`, it is the same process (same process ID and start time), and it still holds the files. On a deployed system it first reads the solution update state and stops nothing while an update is installing, preparing, or running health checks. Before the cluster exists, it cannot check this, so confirm in the Azure portal that the deployment is not running.
 
-**Changes:** stops each process that holds the external copy's files, is named `powershell`, `pwsh`, or `wsmprovhost`, and does not run a Windows service. Work that is not saved in those sessions is lost, and stopping a `wsmprovhost` process ends the remote PowerShell sessions that it hosts. It does not stop the PowerShell window that you run it from, any service, or any other process. Running VMs are not affected.
+**Changes:** stops the PowerShell processes described above. Work that is not saved in them is lost, and stopping a `wsmprovhost` process ends your remote PowerShell session that it hosts. It does not stop the window you run it from, any service, or any other process. Running VMs are not affected.
 
 ```powershell
 & {
-    $moduleRoot = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules\AzStackHci.EnvironmentChecker'
-    $sessionNames = 'powershell', 'pwsh', 'wsmprovhost'
-    $files = @(Get-ChildItem -Path $moduleRoot -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -as [version] } |
-        ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Recurse -File -Force -ErrorAction SilentlyContinue } |
-        ForEach-Object { $_.FullName })
-    $holderIds = @()
-    $checkError = $null
-    if ($files.Count -gt 0) {
-        try {
-            if (-not ('EnvCheckerFileHolders' -as [type])) {
-                Add-Type -ErrorAction Stop -TypeDefinition @'
-using System;
-using System.Collections.Generic;
-using System.ComponentModel;
-using System.Runtime.InteropServices;
-using System.Text;
-public static class EnvCheckerFileHolders {
-    [StructLayout(LayoutKind.Sequential)]
-    struct RM_UNIQUE_PROCESS { public int ProcessId; public System.Runtime.InteropServices.ComTypes.FILETIME StartTime; }
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    struct RM_PROCESS_INFO {
-        public RM_UNIQUE_PROCESS Process;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string AppName;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)] public string ServiceShortName;
-        public int ApplicationType; public uint AppStatus; public uint SessionId;
-        [MarshalAs(UnmanagedType.Bool)] public bool Restartable;
+    if (-not (Get-Command -Name Get-EnvCheckerFileHolder -CommandType Function -ErrorAction SilentlyContinue)) {
+        Write-Output 'STEP_1_NOT_RUN'
+        Write-Output 'Nothing was stopped. Run Step 1 in this window and review its list first.'
+        return
     }
-    [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
-    static extern int RmStartSession(out uint session, int flags, StringBuilder key);
-    [DllImport("rstrtmgr.dll")]
-    static extern int RmEndSession(uint session);
-    [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
-    static extern int RmRegisterResources(uint session, uint fileCount, string[] files, uint appCount, RM_UNIQUE_PROCESS[] apps, uint serviceCount, string[] services);
-    [DllImport("rstrtmgr.dll")]
-    static extern int RmGetList(uint session, out uint needed, ref uint count, [In, Out] RM_PROCESS_INFO[] info, ref uint reasons);
-    public static int[] GetProcessIds(string[] files) {
-        uint session;
-        int rc = RmStartSession(out session, 0, new StringBuilder(64));
-        if (rc != 0) { throw new Win32Exception(rc); }
-        try {
-            rc = RmRegisterResources(session, (uint)files.Length, files, 0, null, 0, null);
-            if (rc != 0) { throw new Win32Exception(rc); }
-            for (int attempt = 0; attempt < 5; attempt++) {
-                uint needed = 0, count = 0, reasons = 0;
-                rc = RmGetList(session, out needed, ref count, null, ref reasons);
-                if (rc == 0) { return new int[0]; }
-                if (rc != 234) { throw new Win32Exception(rc); }
-                RM_PROCESS_INFO[] info = new RM_PROCESS_INFO[needed];
-                count = needed;
-                rc = RmGetList(session, out needed, ref count, info, ref reasons);
-                if (rc == 0) {
-                    List<int> ids = new List<int>();
-                    for (int i = 0; i < count; i++) { ids.Add(info[i].Process.ProcessId); }
-                    return ids.ToArray();
-                }
-                if (rc != 234) { throw new Win32Exception(rc); }
-            }
-            throw new Win32Exception(234);
+    $clusterExists = $true
+    try { $null = Get-ClusterNode -ErrorAction Stop } catch { $clusterExists = $false }
+    if ($clusterExists) {
+        Import-Module -Name Microsoft.AzureStack.Lcm.PowerShell -ErrorAction SilentlyContinue 4>$null
+        try { $active = @(Get-SolutionUpdate -ErrorAction Stop 4>$null | Where-Object { 'Installing', 'Preparing', 'HealthChecking' -contains $_.State }) }
+        catch {
+            Write-Output 'UPDATE_STATE_UNKNOWN'
+            Write-Output "Nothing was stopped. Could not read the solution update state: $($_.Exception.Message)"
+            return
         }
-        finally { RmEndSession(session); }
+        if ($active.Count -gt 0) {
+            Write-Output 'UPDATE_IN_PROGRESS'
+            Write-Output "Nothing was stopped. $($active[0].DisplayName) is $($active[0].State)."
+            return
+        }
     }
-}
-'@
-            }
-            $holderIds = @([EnvCheckerFileHolders]::GetProcessIds([string[]]$files))
-        }
-        catch { $checkError = $_.Exception.Message }
-    }
-    $services = @(Get-CimInstance -ClassName Win32_Service -Filter 'ProcessId > 0' -ErrorAction SilentlyContinue)
-    $rows = @(foreach ($id in @($holderIds | Sort-Object -Unique)) {
-        $process = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $id" -ErrorAction SilentlyContinue
-        if (-not $process) { continue }
-        $owner = (Get-Process -Id $id -IncludeUserName -ErrorAction SilentlyContinue).UserName
-        $serviceNames = @($services | Where-Object { $_.ProcessId -eq $id } | ForEach-Object { $_.Name })
-        $isSession = ($sessionNames -contains ($process.Name -replace '\.exe$', '')) -and ($serviceNames.Count -eq 0)
-        [pscustomobject]@{
-            ProcessId   = $id
-            Name        = $process.Name
-            Owner       = if ($owner) { $owner } else { 'unknown' }
-            SessionId   = $process.SessionId
-            Service     = $serviceNames -join ', '
-            StartTime   = $process.CreationDate
-            CanStop     = $isSession -and ($id -ne $PID)
-            NextStep    = if ($id -eq $PID) { 'This PowerShell window holds the files. Close it, open a new window, and start again at Step 1.' } elseif ($isSession) { 'Step 2 stops it.' } else { 'Step 2 does not stop it. See Step 3.' }
-            CommandLine = $process.CommandLine
-        }
-    })
-    if ($checkError) {
+    try { $holders = @(Get-EnvCheckerFileHolder) }
+    catch {
         Write-Output 'LOCK_CHECK_UNAVAILABLE'
-        Write-Output "Nothing was stopped. Restart Manager could not be used in this PowerShell session: $checkError"
+        Write-Output "Nothing was stopped: $($_.Exception.Message)"
+        return
     }
-    else {
-        $results = @(foreach ($row in @($rows | Where-Object { $_.CanStop })) {
+    $lines = @(foreach ($row in $holders) {
+        if ($row.CanStop -and ($envCheckerReviewed -contains $row.Key)) {
             try {
                 Stop-Process -Id $row.ProcessId -Force -ErrorAction Stop
                 Wait-Process -Id $row.ProcessId -Timeout 30 -ErrorAction SilentlyContinue
                 "Stopped $($row.Name), process ID $($row.ProcessId), owner $($row.Owner), started $($row.StartTime)."
             }
             catch { "Could not stop $($row.Name), process ID $($row.ProcessId): $($_.Exception.Message)" }
-        })
-        if (@($results | Where-Object { $_ -like 'Stopped *' }).Count -gt 0) { Write-Output 'SESSIONS_STOPPED' } else { Write-Output 'NO_SESSIONS_STOPPED' }
-        $results
-        foreach ($row in @($rows | Where-Object { -not $_.CanStop })) { "Left running: $($row.Name), process ID $($row.ProcessId). $($row.NextStep)" }
-    }
+        }
+        elseif ($row.CanStop) { "Left running: $($row.Name), process ID $($row.ProcessId). It was not in the list you reviewed. Run Step 1 again to review it." }
+        else { "Left running: $($row.Name), process ID $($row.ProcessId). $($row.NextStep)" }
+    })
+    if (@($lines | Where-Object { $_ -like 'Stopped *' }).Count -gt 0) { Write-Output 'SESSIONS_STOPPED' } else { Write-Output 'NO_SESSIONS_STOPPED' }
+    $lines
 }
 ```
 
 | Result | Meaning | Next step |
 | --- | --- | --- |
-| `SESSIONS_STOPPED` | The script stopped the PowerShell sessions it lists. It also lists each process that it left running. | Go to Step 3. |
-| `NO_SESSIONS_STOPPED` | No PowerShell session held the files when the script ran, or the ones it found had already ended. | Go to Step 3. |
-| `LOCK_CHECK_UNAVAILABLE` | The check could not run, so nothing was stopped. | Go to Step 3. |
+| `SESSIONS_STOPPED` | The script stopped the sessions it lists, and lists each process that it left running. | Go to Step 3. |
+| `NO_SESSIONS_STOPPED` | No reviewed session still held the files. | Go to Step 3. |
+| `UPDATE_IN_PROGRESS` | A solution update is installing, preparing, or running health checks, so nothing was stopped. Its PowerShell sessions can hold the files. | Wait until the update stops, then start again at Step 1. |
+| `UPDATE_STATE_UNKNOWN` | The update state could not be read, so nothing was stopped. | Run Step 2 again in a minute. If it keeps printing this, close the sessions yourself as Step 3 describes. |
+| `STEP_1_NOT_RUN` or `LOCK_CHECK_UNAVAILABLE` | Nothing was stopped. | Run Step 1 in this window, then this step again. If Step 1 prints `LOCK_CHECK_UNAVAILABLE`, follow its row. |
 
 ### Step 3: Close the other programs that hold the files
 
-Step 2 does not stop programs that are not PowerShell sessions or that run a Windows service, because only a person can tell whether it is safe to end them.
+Do this step only if Step 1 printed `OTHER_HOLDERS_FOUND`. For each process whose `NextStep` does not say `Step 2 stops it.`, do what its `NextStep` says. Contact the owner before you close anything of theirs. Never sign out session 0: it runs the Windows services and remote sessions.
 
-**Changes:** ends each program that you close, and any work that is not saved in it. Signing a user out ends all of that user's programs on this machine. Running VMs are not affected.
-
-Do this step only if Step 1 printed `OTHER_HOLDERS_FOUND`. If it printed anything else, there is nothing to close.
-
-1. Close each program that Step 1 lists as not stopped by Step 2, or ask the user shown as its owner to close it.
-2. If that user is not available, sign the user out of this machine with the `logoff` command and the session ID that Step 1 shows for the program.
-3. Leave a program running if it runs a Windows service or if you cannot close it. The cleanup in Step 5 removes what it can, and Step 6 tells you whether a restart is needed.
-
-When you are done, go to Step 4. It checks whether the files are still in use.
+**Changes:** ends each program that you or its owner closes, and any work that is not saved in it. Signing a user out with `logoff` ends all of that user's programs in that session. Running VMs are not affected.
 
 ### Step 4: Confirm that the files are released
 
-This step changes nothing. It opens each file in the external copy's version-number folders for exclusive use, without reading or writing anything, and closes it again at once. A file that cannot be opened this way is still in use. Paste or run the whole block at once.
-
-```powershell
-& {
-    $moduleRoot = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules\AzStackHci.EnvironmentChecker'
-    $files = @(Get-ChildItem -Path $moduleRoot -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -as [version] } |
-        ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Recurse -File -Force -ErrorAction SilentlyContinue } |
-        ForEach-Object { $_.FullName })
-    $inUse = @()
-    $checkError = $null
-    foreach ($file in $files) {
-        try {
-            $stream = [System.IO.File]::Open($file, 'Open', 'ReadWrite', 'None')
-            $stream.Close()
-        }
-        catch [System.IO.IOException] { if (Test-Path -LiteralPath $file) { $inUse += $file } }
-        catch [System.UnauthorizedAccessException] { $inUse += $file }
-        catch { $checkError = $_.Exception.Message; break }
-    }
-    if ($checkError) {
-        Write-Output 'LOCK_CHECK_UNAVAILABLE'
-        Write-Output "The check could not run in this PowerShell session: $checkError"
-    }
-    elseif ($files.Count -eq 0) {
-        Write-Output 'NO_FILES_TO_CHECK'
-        Write-Output 'This machine has no files in version-number folders of the module.'
-    }
-    elseif ($inUse.Count -gt 0) {
-        Write-Output 'FILES_IN_USE'
-        $inUse | ForEach-Object { "In use: $_" }
-        Write-Output 'Run the Step 1 script again to see which processes hold these files.'
-    }
-    else {
-        Write-Output 'FILES_RELEASED'
-        Write-Output "No file in the external copy's version-number folders is in use ($($files.Count) files checked)."
-    }
-}
-```
-
-| Result | Meaning | Next step |
-| --- | --- | --- |
-| `FILES_RELEASED` | No file of the external copy is in use on this machine. | Go to Step 5. |
-| `FILES_IN_USE` | The script lists the files that are still in use: a program that you could not close, a Windows service, or a PowerShell session that started after Step 2 holds them. The Step 1 script shows which processes they are. | Go to Step 5 if no step can release them. The cleanup removes everything it can, and Step 6 tells you whether a restart is needed. |
-| `NO_FILES_TO_CHECK` | This machine has no files in version-number folders. | Go to Step 5. |
-| `LOCK_CHECK_UNAVAILABLE` | The check could not run in this PowerShell session. | Go to Step 5. |
+Run the Step 1 script again in the same window. It changes nothing. If it prints `NO_LOCKING_SESSIONS`, the files are released. If it still lists processes that you cannot close, go on anyway: Step 5 removes everything it can, and Step 6 tells you whether a restart is needed.
 
 ### Step 5: Run the cleanup script
-
-Run this on each affected machine, after Steps 1 to 4 on that machine.
 
 **Changes:** unloads, uninstalls, and deletes only copies in version-number folders. The inbox module and running VMs are not affected. When the inbox module is missing, the script removes nothing.
 
 ```powershell
-$moduleName = "AzStackHci.EnvironmentChecker"
-if (-not (Get-Module -Name $moduleName -ListAvailable | Where-Object {$_.Path -notlike "*$($_.Version)*"})) {
-    Write-Output "INBOX_MODULE_MISSING"
-    Write-Output "The inbox module is missing, so nothing was removed."
-} else {
-    # Unload any previously loaded modules
-    $loadedModule = Get-Module -Name $moduleName | Where-Object {$_.Path -like "*$($_.Version)*"}
-    if ($loadedModule)
-    {
-        Write-Host "Loaded module(s) found for $($loadedModule.Name):"
-        Write-Host ($loadedModule | Format-Table Name, Version, Path -AutoSize | Out-String)
-        Write-Host "Unloading"
-        $loadedModule | Remove-Module -Force
+& {
+    $moduleName = 'AzStackHci.EnvironmentChecker'
+    if (-not (Get-Module -Name $moduleName -ListAvailable | Where-Object { $_.Path -notlike "*$($_.Version)*" })) {
+        Write-Output 'INBOX_MODULE_MISSING'
+        Write-Output 'The inbox module is missing, so nothing was removed.'
+        return
     }
-
-    # Uninstall any modules installed from external
-    $installedModule = Get-Module -Name $moduleName -ListAvailable | Where-Object {$_.Path -like "*$($_.Version)*"}
-    if ($installedModule)
-    {
-        Write-Host "Externally installed module(s) found for $($installedModule.Name):"
-        Write-Host ($installedModule | Format-Table Name, Version, Path -AutoSize | Out-String)
-        Write-Host "Uninstalling module(s)"
-        $installedModule | Uninstall-Module -Force -ErrorAction SilentlyContinue
-        foreach ($im in $installedModule)
-        {
-            Write-Host "Checking module still exists on disk..."
-            if (Test-Path $im.ModuleBase -ErrorAction SilentlyContinue) {
-                Write-Host "Removing old module files $($im.ModuleBase)"
-                Remove-Item -Path $im.ModuleBase -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable removeErrors
-                if ($removeErrors) {
-                    Write-Host "Some files in $($im.ModuleBase) are still in use and were not removed: $($removeErrors[0].Exception.Message)"
-                }
-            }else {
-                Write-Host "Old module files not found at $($im.ModuleBase)"
-            }
+    $log = @()
+    foreach ($loaded in @(Get-Module -Name $moduleName | Where-Object { $_.Path -like "*$($_.Version)*" })) {
+        $loaded | Remove-Module -Force
+        $log += "Unloaded $($loaded.Path)"
+    }
+    $external = @(Get-Module -Name $moduleName -ListAvailable | Where-Object { $_.Path -like "*$($_.Version)*" })
+    if ($external.Count -eq 0) { $log += 'Nothing to uninstall.' }
+    foreach ($module in $external) {
+        $module | Uninstall-Module -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $module.ModuleBase) {
+            Remove-Item -LiteralPath $module.ModuleBase -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable removeErrors
+            if ($removeErrors) { $log += "Some files in $($module.ModuleBase) are still in use and were not removed: $($removeErrors[0].Exception.Message)" }
+            else { $log += "Removed $($module.ModuleBase)" }
         }
-    } else {
-        Write-Host "Nothing to uninstall"
+        else { $log += "Uninstalled $($module.ModuleBase)" }
     }
-
-    # Check final module is our one.
-    $FinalModule = Get-Module -Name $moduleName -ListAvailable
-    if (-not ($FinalModule | Where-Object {$_.Path -notlike "*$($_.Version)*"})) {
-        Write-Output "INBOX_MODULE_MISSING"
-    } elseif ($FinalModule | Where-Object {$_.Path -like "*$($_.Version)*"}) {
-        Write-Output "CLEANUP_EXTERNAL_REMAINS"
-    } else {
-        Write-Output "CLEANUP_EXTERNAL_REMOVED"
-    }
-    Write-Host "Final installed module:"
-    Write-Host ($FinalModule | Format-Table Name, Version, Path -AutoSize | Out-String)
+    $final = @(Get-Module -Name $moduleName -ListAvailable)
+    if (-not ($final | Where-Object { $_.Path -notlike "*$($_.Version)*" })) { Write-Output 'INBOX_MODULE_MISSING' }
+    elseif ($final | Where-Object { $_.Path -like "*$($_.Version)*" }) { Write-Output 'CLEANUP_EXTERNAL_REMAINS' }
+    else { Write-Output 'CLEANUP_EXTERNAL_REMOVED' }
+    $log
+    'Modules listed now:'
+    $final | Format-Table Name, Version, Path -AutoSize
 }
 ```
-
-The result line appears just before the final module list:
 
 | Result | Meaning | Next step |
 | --- | --- | --- |
@@ -567,63 +449,64 @@ The result line appears just before the final module list:
 
 ### Step 6: Check whether a restart is needed
 
-This step changes nothing. A restart is needed only in the rare case where Step 5 printed `CLEANUP_EXTERNAL_REMAINS`, because a program that is still running holds the copy's module manifest. The script checks for that case again and, when a restart is needed, prints how to restart this machine safely.
+This step changes nothing. A restart is needed only in the rare case where Step 5 printed `CLEANUP_EXTERNAL_REMAINS`. The script checks for that case again and, when a restart is needed, prints how to restart this machine safely for its cluster size.
 
 ```powershell
-$moduleName = "AzStackHci.EnvironmentChecker"
-$remaining = @(Get-Module -Name $moduleName -ListAvailable | Where-Object {$_.Path -like "*$($_.Version)*"})
-if ($remaining.Count -eq 0) {
-    Write-Output "NO_RESTART_NEEDED"
-} else {
-    Write-Output "RESTART_REQUIRED"
+& {
+    $remaining = @(Get-Module -Name 'AzStackHci.EnvironmentChecker' -ListAvailable | Where-Object { $_.Path -like "*$($_.Version)*" })
+    if ($remaining.Count -eq 0) {
+        Write-Output 'NO_RESTART_NEEDED'
+        return
+    }
+    Write-Output 'RESTART_REQUIRED'
     $remaining | ForEach-Object { "Still listed: $($_.Path)" }
     $machineCount = @(Get-ClusterNode -ErrorAction SilentlyContinue).Count
     if ($machineCount -gt 1) {
         "This machine is in a cluster of $machineCount machines. Pause and drain it before the restart, and resume it afterward: https://learn.microsoft.com/azure/azure-local/manage/suspend-resume-cluster-maintenance"
     } elseif ($machineCount -eq 1) {
-        "This is a single-machine instance. The restart stops all running VMs, so plan a maintenance window and shut down or save the VMs first."
+        'This is a single-machine instance. The restart stops all running VMs, so plan a maintenance window and shut down or save the VMs first.'
     } else {
-        "The cluster does not exist yet, so restart this machine normally."
+        'The cluster does not exist yet, so restart this machine normally.'
     }
-    "After the restart, run Steps 5, 6, and 7 again."
+    'After the restart, run Steps 5, 6, and 7 again.'
 }
 ```
 
 | Result | Meaning | What to do |
 | --- | --- | --- |
 | `NO_RESTART_NEEDED` | The external copy no longer loads. | Go to Step 7. |
-| `RESTART_REQUIRED` | The external copy is still listed, and only a restart releases the files that hold it. The script prints the maintenance procedure that fits this machine's cluster size. On a single-machine instance, a restart stops all running VMs. Until the restart, Step 7 deletes nothing and the retry script retries nothing. | Follow the printed guidance. |
+| `RESTART_REQUIRED` | The external copy is still listed, and only a restart releases the files that hold it. Until the restart, Step 7 deletes nothing and the retry script retries nothing. | Restart the machine as the script prints. |
+
+If you restart the machine: **Changes:** restarts this machine and ends every program on it. In a cluster, pausing and draining the machine first moves its VMs to the other machines. **[HIGH RISK]** On a single-machine instance, the restart stops all running VMs until the machine is back.
 
 ### Step 7: Delete leftover folders
 
 **Changes:** deletes only subfolders whose name is a version number. The inbox files are not in such a subfolder and are not touched. The script deletes nothing when the inbox module is missing or while an external copy still loads.
 
 ```powershell
-$moduleName = "AzStackHci.EnvironmentChecker"
-$root = Join-Path $env:ProgramFiles "WindowsPowerShell\Modules\$moduleName"
-$available = @(Get-Module -Name $moduleName -ListAvailable)
-if (@($available | Where-Object {$_.Path -notlike "*$($_.Version)*"}).Count -eq 0) {
-    Write-Output "INBOX_MODULE_MISSING"
-    Write-Output "The inbox module is missing, so nothing was deleted."
-} elseif (@($available | Where-Object {$_.Path -like "*$($_.Version)*"}).Count -gt 0) {
-    Write-Output "RESTART_REQUIRED"
-    Write-Output "An external copy still loads, so nothing was deleted. Step 6 prints how to restart this machine."
-} else {
+& {
+    $moduleName = 'AzStackHci.EnvironmentChecker'
+    $root = Join-Path $env:ProgramFiles "WindowsPowerShell\Modules\$moduleName"
+    $available = @(Get-Module -Name $moduleName -ListAvailable)
+    if (@($available | Where-Object { $_.Path -notlike "*$($_.Version)*" }).Count -eq 0) {
+        Write-Output 'INBOX_MODULE_MISSING'
+        Write-Output 'The inbox module is missing, so nothing was deleted.'
+        return
+    }
+    if (@($available | Where-Object { $_.Path -like "*$($_.Version)*" }).Count -gt 0) {
+        Write-Output 'RESTART_REQUIRED'
+        Write-Output 'An external copy still loads, so nothing was deleted. Step 6 prints how to restart this machine.'
+        return
+    }
     $leftover = @(Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -as [version] })
     $inUse = @()
     foreach ($folder in $leftover) {
-        Write-Host "Removing leftover folder $($folder.FullName)"
         Remove-Item -LiteralPath $folder.FullName -Recurse -Force -ErrorAction SilentlyContinue
         if (Test-Path -LiteralPath $folder.FullName) { $inUse += $folder.FullName }
     }
-    if ($leftover.Count -eq 0) {
-        Write-Output "NO_LEFTOVER_FOLDERS"
-    } elseif ($inUse.Count -gt 0) {
-        Write-Output "LEFTOVER_FOLDER_IN_USE"
-        $inUse | ForEach-Object { "Still in use, left in place: $_" }
-    } else {
-        Write-Output "LEFTOVER_FOLDERS_REMOVED"
-    }
+    if ($leftover.Count -eq 0) { Write-Output 'NO_LEFTOVER_FOLDERS' }
+    elseif ($inUse.Count -gt 0) { Write-Output 'LEFTOVER_FOLDER_IN_USE'; $inUse | ForEach-Object { "Still in use, left in place: $_" } }
+    else { Write-Output 'LEFTOVER_FOLDERS_REMOVED'; $leftover | ForEach-Object { "Removed $($_.FullName)" } }
 }
 ```
 
