@@ -189,7 +189,7 @@ Run these steps in order on each affected machine, in one PowerShell window: Ste
 
 This step changes nothing. It asks Windows Restart Manager which processes hold files in the external copy's version-number folders, lists each one with its owner, sign-in session, start time, Windows service, and command line, and says in `NextStep` what to do about it. `Get-Process` does not show these files, because PowerShell loads the module's .NET files in a way that it does not list. Remote PowerShell sessions appear as `wsmprovhost`.
 
-The script marks a process `Step 2 stops it.` only if it is a PowerShell process (`powershell`, `pwsh`, or `wsmprovhost`) that a person started: it does not run as SYSTEM, LocalService, NetworkService, or an account that runs a Windows service, does not run or belong to a Windows service, and is in a signed-in user's session. The only `wsmprovhost` processes that it marks are your own remote sessions. It saves those processes, by process ID and start time, for Step 2.
+The script marks a process `Step 2 stops it.` only if it is a PowerShell process (`powershell`, `pwsh`, or `wsmprovhost`) that a person started: it does not run as SYSTEM, LocalService, NetworkService, or an account that runs a Windows service, does not run or belong to a Windows service, and is in a signed-in user's session. The only `wsmprovhost` processes that it marks are remote sessions that run under your account. It saves those processes, by process ID and start time, for Step 2.
 
 ```powershell
 . {
@@ -317,7 +317,7 @@ public static class EnvCheckerFileHolders {
         Write-Output "No process holds files in the external copy's version-number folders."
     }
     else {
-        if (@($holders | Where-Object { -not $_.CanStop -and $_.ProcessId -ne $PID }).Count -gt 0) { Write-Output 'OTHER_HOLDERS_FOUND' }
+        if (@($holders | Where-Object { -not $_.CanStop }).Count -gt 0) { Write-Output 'OTHER_HOLDERS_FOUND' }
         else { Write-Output 'LOCKING_SESSIONS_FOUND' }
         $envCheckerReviewed = @($holders | Where-Object { $_.CanStop } | ForEach-Object { $_.Key })
         $holders | Format-List ProcessId, Name, Owner, SessionId, Service, StartTime, NextStep, CommandLine
@@ -335,7 +335,7 @@ public static class EnvCheckerFileHolders {
 
 ### Step 2: Stop the PowerShell sessions that hold the files
 
-Run this in the same window, after you have read the Step 1 list. It stops a process only if Step 1 marked it `Step 2 stops it.`, it is the same process (same process ID and start time), and it still holds the files. On a deployed system it first reads the solution update state and stops nothing while an update is installing, preparing, or running health checks. Before the cluster exists, it cannot check this, so confirm in the Azure portal that the deployment is not running.
+Run this in the same window, after you have read the Step 1 list. It stops a process only if Step 1 marked it `Step 2 stops it.`, it is the same process (same process ID and start time), and it still holds the files. On a deployed system it first reads the solution update state and stops nothing while an update is installing, preparing, or running health checks. It cannot check deployment, add node, or repair node operations, so confirm in the Azure portal that none is running, especially if you are signed in with the deployment account. If the list includes another person's session, ask them before you run this step.
 
 **Changes:** stops the PowerShell processes described above. Work that is not saved in them is lost, and stopping a `wsmprovhost` process ends your remote PowerShell session that it hosts. It does not stop the window you run it from, any service, or any other process. Running VMs are not affected.
 
@@ -390,7 +390,7 @@ Run this in the same window, after you have read the Step 1 list. It stops a pro
 | `SESSIONS_STOPPED` | The script stopped the sessions it lists, and lists each process that it left running. | Go to Step 3. |
 | `NO_SESSIONS_STOPPED` | No reviewed session still held the files. | Go to Step 3. |
 | `UPDATE_IN_PROGRESS` | A solution update is installing, preparing, or running health checks, so nothing was stopped. Its PowerShell sessions can hold the files. | Wait until the update stops, then start again at Step 1. |
-| `UPDATE_STATE_UNKNOWN` | The update state could not be read, so nothing was stopped. | Run Step 2 again in a minute. If it keeps printing this, close the sessions yourself as Step 3 describes. |
+| `UPDATE_STATE_UNKNOWN` | The update state could not be read, so nothing was stopped. | Run Step 2 again in a minute. If it keeps printing this and no operation is running, close the sessions that Step 1 marked `Step 2 stops it.` yourself, with their owners' agreement, then go to Step 4. |
 | `STEP_1_NOT_RUN` or `LOCK_CHECK_UNAVAILABLE` | Nothing was stopped. | Run Step 1 in this window, then this step again. If Step 1 prints `LOCK_CHECK_UNAVAILABLE`, follow its row. |
 
 ### Step 3: Close the other programs that hold the files
@@ -401,7 +401,7 @@ Do this step only if Step 1 printed `OTHER_HOLDERS_FOUND`. For each process whos
 
 ### Step 4: Confirm that the files are released
 
-Run the Step 1 script again in the same window. It changes nothing. If it prints `NO_LOCKING_SESSIONS`, the files are released. If it still lists processes that you cannot close, go on anyway: Step 5 removes everything it can, and Step 6 tells you whether a restart is needed.
+Run the Step 1 script again in the same window. It changes nothing. If it prints `NO_LOCKING_SESSIONS`, the files are released. If it lists a process that Step 2 stops, run Step 2 again. If it still lists processes that you cannot close, go on anyway: Step 5 removes everything it can, and Step 6 tells you whether a restart is needed.
 
 ### Step 5: Run the cleanup script
 
