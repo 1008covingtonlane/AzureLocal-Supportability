@@ -757,10 +757,20 @@ Run this script on one machine, after [Verify the fix](#verify-the-fix) printed 
     } else {
         $updates = $null
         $updateError = $null
+        $busy = $false
         Import-Module -Name Microsoft.AzureStack.Lcm.PowerShell -ErrorAction SilentlyContinue 4>$null
-        try { $updates = @(Get-SolutionUpdate -ErrorAction Stop 4>$null) }
-        catch { $updateError = $_.Exception.Message }
-        if ($null -eq $updates) {
+        foreach ($attempt in 1..3) {
+            try { $updates = @(Get-SolutionUpdate -ErrorAction Stop 4>$null); break }
+            catch { $updateError = $_.Exception.Message }
+            $busy = $updateError -like '*already in progress*'
+            if (-not $busy) { break }
+            if ($attempt -lt 3) { Start-Sleep -Seconds (Get-Random -Minimum 5 -Maximum 21) }
+        }
+        if ($null -eq $updates -and $busy) {
+            Write-Output "UPDATE_CHECK_BUSY"
+            Write-Output "Another machine is checking the update at the same time, so nothing was retried. Run this script again in a minute."
+            $notCheckedLines
+        } elseif ($null -eq $updates) {
             Write-Output "UPDATE_SERVICE_NOT_AVAILABLE"
             Write-Output "Could not read solution updates: $updateError"
             Write-Output "If a deployment failed, resume it: open your Azure Local instance, go to Deployments, and select Resume deployment."
@@ -773,13 +783,22 @@ Run this script on one machine, after [Verify the fix](#verify-the-fix) printed 
                     Write-Output "SOLUTION_UPDATE_RESUMED"
                     Write-Output "Resumed $($failed[0].DisplayName). Update run: $run"
                 } catch {
-                    $state = (Get-SolutionUpdate -Id $failed[0].ResourceId -ErrorAction SilentlyContinue 4>$null).State
+                    $startError = $_.Exception.Message
+                    $state = $null
+                    foreach ($attempt in 1..3) {
+                        try { $state = (Get-SolutionUpdate -Id $failed[0].ResourceId -ErrorAction Stop 4>$null).State } catch { $state = $null }
+                        if ($state -eq 'Installing' -or $startError -notlike '*already in progress*') { break }
+                        if ($attempt -lt 3) { Start-Sleep -Seconds (Get-Random -Minimum 5 -Maximum 21) }
+                    }
                     if ($state -eq 'Installing') {
                         Write-Output "SOLUTION_UPDATE_RESUMED"
                         Write-Output "$($failed[0].DisplayName) is already installing again."
+                    } elseif ($startError -like '*already in progress*') {
+                        Write-Output "UPDATE_CHECK_BUSY"
+                        Write-Output "Another machine is starting or checking the update at the same time, so this machine did not resume it. Run this script again in a minute."
                     } else {
                         Write-Output "SOLUTION_UPDATE_NOT_RESUMED"
-                        Write-Output "Start-SolutionUpdate did not resume $($failed[0].DisplayName): $($_.Exception.Message)"
+                        Write-Output "Start-SolutionUpdate did not resume $($failed[0].DisplayName): $startError"
                     }
                 }
             } elseif ($failed.Count -gt 1) {
@@ -790,7 +809,7 @@ Run this script on one machine, after [Verify the fix](#verify-the-fix) printed 
                 Write-Output "No solution update failed during installation. Retry the operation that failed the same way you started it. An update that shows HealthCheckFailed failed in its readiness check: select Try again on it, or run the same Start-SolutionUpdate command again."
             }
             $notCheckedLines
-            Get-SolutionUpdate -ErrorAction SilentlyContinue 4>$null | Format-Table DisplayName, Version, State -AutoSize
+            try { Get-SolutionUpdate -ErrorAction Stop 4>$null | Format-Table DisplayName, Version, State -AutoSize } catch { }
         }
     }
 }
@@ -802,6 +821,7 @@ Run this script on one machine, after [Verify the fix](#verify-the-fix) printed 
 | `NO_UPDATE_TO_RESUME` | No solution update failed during installation, so nothing was resumed. The script prints how to retry other operations, including an update that failed in its readiness check (`HealthCheckFailed`). | Retry the operation that failed the same way you started it. If you started a readiness check with `Start-SolutionUpdate -PrepareOnly`, use the same command again. |
 | `CLUSTER_NOT_DEPLOYED` | The cluster does not exist yet, so the failed operation is a deployment. Only this machine was checked. | Confirm with [Verify the fix](#verify-the-fix) that every machine prints `THIS_MACHINE_CLEAN`, then resume the deployment as described in [Resume deployment](https://learn.microsoft.com/azure/azure-local/deploy/deploy-via-portal#resume-deployment). |
 | `UPDATE_SERVICE_NOT_AVAILABLE` | The cluster exists, but the solution update service did not answer. This can happen when a deployment failed after the cluster was created. | For a deployment, see [Resume deployment](https://learn.microsoft.com/azure/azure-local/deploy/deploy-via-portal#resume-deployment). On a deployed system, see [Troubleshoot solution updates for Azure Local](https://learn.microsoft.com/azure/azure-local/update/update-troubleshooting-23h2). |
+| `UPDATE_CHECK_BUSY` | Another machine was reading or starting the update at the same moment, for example because this script runs on several machines at once, and the update service was still busy after three tries within about a minute. Nothing was retried on this machine. | Run this script again in a minute. |
 | `SOLUTION_UPDATE_NOT_RESUMED` | The update did not start again. The script prints the reason. | Retry the update the same way you started it. If it still does not start, [contact Microsoft support](#when-to-contact-microsoft-support). |
 | `RETRY_BLOCKED` | This machine, or another machine that the script reached, still has an external copy or is missing the inbox module. The script names each one. | Run Steps 1 to 7 on each named machine, then run this script again. |
 | `OTHER_MACHINES_NOT_CHECKED:` followed by machine names | Printed after the result. The script could not reach these machines with PowerShell remoting, so it did not check them. This does not mean that they have a problem. | Run [Verify the fix](#verify-the-fix) on each named machine. If one is not clean, run Steps 1 to 7 there and then this script again; until then, a resumed update can fail again with the same error. |
