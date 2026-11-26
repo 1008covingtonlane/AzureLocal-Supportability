@@ -12,7 +12,7 @@
     "technical_grade": "A",
     "reproduction_substrate": "hardware",
     "automation_status": "proven",
-    "last_validated": "2026-11-20",
+    "last_validated": "2026-11-26",
     "spec_ref": "AzStackHci_EnvironmentChecker_ModuleShadowing"
   }
 }
@@ -44,7 +44,7 @@
 | Date | Summary |
 | --- | --- |
 | 2026-11-20 | Corrected the expected inbox module path and the Issue Validation command. Added the error that newer builds show, steps for module files that are still in use, commands for all machines, and guidance to verify, escalate, and prevent the problem. Added the metadata marker. Step 1 now lists every PowerShell session that could hold the external copy's files, including remote sessions, and the impact labels are replaced with plain statements of what each step changes. |
-| 2026-11-26 | Corrected the statement that Windows cannot report which process holds the module's files: Step 1 now uses Windows Restart Manager to list the exact processes, and Step 2 stops only the PowerShell sessions in that list, after you review it. Every script now prints a result line. Step 5 checks whether a restart is needed and prints how to restart the machine safely. Verify the fix checks every machine, and a solution update that failed during installation can be resumed with one script once every machine is clean. |
+| 2026-11-26 | Corrected the statement that Windows cannot report which process holds the module's files: Step 1 now uses Windows Restart Manager to list the exact processes, and Step 2 stops only the PowerShell sessions in that list, after you review it. Every script now prints a result line. Step 5 checks whether a restart is needed and prints how to restart the machine safely. Verify the fix checks every machine, and a solution update that failed during installation can be resumed with one script once every machine is clean. Added that deployment and updates can leave copies behind, and that the scripts need a full language PowerShell session. |
 
 ## At a glance
 
@@ -100,7 +100,7 @@ The system health check (`Invoke-SolutionUpdatePrecheck -SystemHealth`) runs the
 | --- | --- |
 | Environment Checker | The `AzStackHci.EnvironmentChecker` PowerShell module that runs the Azure Local readiness checks. |
 | Inbox module | The copy that ships with Azure Local, in `C:\Program Files\WindowsPowerShell\Modules\AzStackHci.EnvironmentChecker`. Its files sit directly in that folder, with no version-number subfolder. Never delete it. |
-| External copy | Any other copy, for example one installed with `Install-Module` from the PowerShell Gallery. It lives in a version-number subfolder such as `...\AzStackHci.EnvironmentChecker\10.2411.0.12`. Deployment can also leave copies in version-number folders on some machines; they are removed the same way. A listed copy without the error in [Symptoms](#symptoms) is not by itself the cause of a failure. |
+| External copy | Any other copy, for example one installed with `Install-Module` from the PowerShell Gallery. It lives in a version-number subfolder such as `...\AzStackHci.EnvironmentChecker\10.2411.0.12`. Deployment and solution updates can also leave copies in version-number folders on some machines, and those copies can stay after the operation succeeds. They are removed the same way. A listed copy without the error in [Symptoms](#symptoms) is not by itself the cause of a failure. |
 | PowerShell Gallery | The public online repository that `Install-Module` downloads PowerShell modules from. |
 | In use | A process, usually a PowerShell window or remote session, still has files from the external copy loaded, so Windows does not allow them to be deleted. |
 | Restart Manager | A built-in Windows component that reports which processes hold a file. [Step 1](#step-1-find-the-processes-that-hold-the-external-copys-files) uses it to name the exact processes that keep the external copy's files in use. |
@@ -120,6 +120,7 @@ The system health check (`Invoke-SolutionUpdatePrecheck -SystemHealth`) runs the
 
 - Open PowerShell with **Run as administrator** on each machine.
 - Make sure no update or deployment step is running right now. If an update shows `Installing`, wait for it to stop before you change anything.
+- Use a PowerShell session in full language mode: `$ExecutionContext.SessionState.LanguageMode` returns `FullLanguage`. This is the default on Azure Local, including when Application Control is enforced. In a constrained session, Step 1 reports `LOCK_CHECK_UNAVAILABLE`, and some of the later scripts stop with an error.
 - Run [Issue Validation](#issue-validation) first. Continue only if it prints `EXTERNAL_COPY_FOUND` or `LEFTOVER_FOLDER_ONLY`.
 - If it prints `INBOX_MODULE_MISSING`, stop and [contact Microsoft support](#when-to-contact-microsoft-support). Do not install a replacement.
 
@@ -609,7 +610,7 @@ Run this on one machine. It changes nothing. It checks every machine of the clus
 | --- | --- | --- |
 | `ALL_MACHINES_CLEAN` | No machine has an external copy, and every machine has the inbox module at `C:\Program Files\WindowsPowerShell\Modules\AzStackHci.EnvironmentChecker\AzStackHci.EnvironmentChecker.psd1`. A `VersionFolders` entry is a folder you deliberately left in place under [Step 6](#step-6-delete-leftover-folders) until the next planned restart; it does not load. | Go to [Retry the failed operation](#retry-the-failed-operation). |
 | `THIS_MACHINE_CLEAN` | The cluster does not exist yet, and this machine is clean. | Run this on every other machine. When each one prints `THIS_MACHINE_CLEAN`, go to [Retry the failed operation](#retry-the-failed-operation). |
-| `NOT_ALL_MACHINES_CLEAN` | At least one machine still has an external copy, is missing the inbox module, or could not be checked. | Run Steps 1 to 6 on each machine where `Clean` is `False`. If a machine could not be checked, run this on that machine. |
+| `NOT_ALL_MACHINES_CLEAN` | At least one machine still has an external copy, is missing the inbox module, or could not be checked. A machine you did not work on can still have a copy that deployment or an update left there. | Run Steps 1 to 6 on each machine where `Clean` is `False`. If a machine could not be checked, run this on that machine. |
 
 Do not use the system health check to confirm this fix. It can keep showing a previous result, and it runs the cleanup only on the machine where it runs.
 
@@ -698,7 +699,7 @@ Run this script on one machine. It first runs the same check as [Verify the fix]
 
 ## Rollback
 
-Normally there is nothing to roll back. A copy installed from the PowerShell Gallery was not part of Azure Local, and a copy left behind by deployment is removed by Azure Local itself before each operation. If you need the standalone Environment Checker from the PowerShell Gallery again, install it only after the operation completes, and remove it again before the next one, as described in [Prevention](#prevention). If you paused and drained a machine, resume it as described in the pause and drain procedure. Sessions that Step 2 stopped cannot be restored; open new PowerShell sessions if you still need them.
+Normally there is nothing to roll back. Azure Local needs only the inbox module, and it tries to remove every other copy itself before an operation, whether the copy came from the PowerShell Gallery or was left by deployment or an update. If you need the standalone Environment Checker from the PowerShell Gallery again, install it only after the operation completes, and remove it again before the next one, as described in [Prevention](#prevention). If you paused and drained a machine, resume it as described in the pause and drain procedure. Sessions that Step 2 stopped cannot be restored; open new PowerShell sessions if you still need them.
 
 ## When to contact Microsoft support
 
