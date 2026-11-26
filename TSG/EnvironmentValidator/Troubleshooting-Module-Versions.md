@@ -521,14 +521,7 @@ if ($remaining.Count -eq 0) {
 | Result | Meaning | What to do |
 | --- | --- | --- |
 | `NO_RESTART_NEEDED` | The external copy no longer loads. | Go to Step 6. |
-| `RESTART_REQUIRED` | The external copy is still listed, and only a restart releases the files that hold it. Until then, Step 6 deletes nothing and the retry script retries nothing. | Restart the machine as the script describes. |
-
-How the restart works: on a deployed cluster with more than one machine, the machine is paused and drained first so its VMs move to other machines, as described in [Suspend and resume Azure Local machines for planned maintenance](https://learn.microsoft.com/azure/azure-local/manage/suspend-resume-cluster-maintenance), and it is resumed afterward. A single-machine instance has no other machine to drain to, so its restart needs a maintenance window. Before the cluster exists (during deployment), the machine restarts normally.
-
-**Plan for:** a maintenance window if a single-machine instance needs the restart.
-
-> [!WARNING]
-> On a single-machine instance, the restart stops all running VMs.
+| `RESTART_REQUIRED` | The external copy is still listed, and only a restart releases the files that hold it. The script prints the safe way to restart this machine for its cluster size, with a link to [Suspend and resume Azure Local machines for planned maintenance](https://learn.microsoft.com/azure/azure-local/manage/suspend-resume-cluster-maintenance). On a single-machine instance, the restart stops all running VMs and needs a maintenance window. Until the restart, Step 6 deletes nothing and the retry script retries nothing. | Follow the printed guidance. |
 
 ### Step 6: Delete leftover folders
 
@@ -543,7 +536,7 @@ if (@($available | Where-Object {$_.Path -notlike "*$($_.Version)*"}).Count -eq 
     Write-Output "The inbox module is missing, so nothing was deleted."
 } elseif (@($available | Where-Object {$_.Path -like "*$($_.Version)*"}).Count -gt 0) {
     Write-Output "RESTART_REQUIRED"
-    Write-Output "An external copy still loads, so nothing was deleted. Restart this machine as Step 5 describes, then run Steps 4, 5, and 6 again."
+    Write-Output "An external copy still loads, so nothing was deleted. Step 5 prints how to restart this machine."
 } else {
     $leftover = @(Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -as [version] })
     $inUse = @()
@@ -567,7 +560,7 @@ if (@($available | Where-Object {$_.Path -notlike "*$($_.Version)*"}).Count -eq 
 | --- | --- | --- |
 | `LEFTOVER_FOLDERS_REMOVED` or `NO_LEFTOVER_FOLDERS` | No version-number folder is left. | Go to [Verify the fix](#verify-the-fix). |
 | `LEFTOVER_FOLDER_IN_USE` | A process that Step 2 does not stop still holds files in the folder. The folder's module manifest is already gone, so it does not load and does not block the operation. | Leave the folder for now and go to [Verify the fix](#verify-the-fix). Run this step again after the machine's next planned restart, rather than restarting the machine for this alone. |
-| `RESTART_REQUIRED` | An external copy still loads, so nothing was deleted. | Restart the machine as Step 5 describes. |
+| `RESTART_REQUIRED` | An external copy still loads, so nothing was deleted. | See Step 5. |
 | `INBOX_MODULE_MISSING` | The inbox module is not listed, so nothing was deleted. | [Contact Microsoft support](#when-to-contact-microsoft-support). |
 
 ## Verify the fix
@@ -701,7 +694,7 @@ Run this script on one machine. It first runs the same check as [Verify the fix]
 | `CLUSTER_NOT_DEPLOYED` | The cluster does not exist yet, so the failed operation is a deployment. Only this machine was checked. | Confirm with [Verify the fix](#verify-the-fix) that every machine prints `THIS_MACHINE_CLEAN`, then resume the deployment as described in [Resume deployment](https://learn.microsoft.com/azure/azure-local/deploy/deploy-via-portal#resume-deployment). |
 | `UPDATE_SERVICE_NOT_AVAILABLE` | The cluster exists, but the solution update service did not answer. This can happen when a deployment failed after the cluster was created. | For a deployment, see [Resume deployment](https://learn.microsoft.com/azure/azure-local/deploy/deploy-via-portal#resume-deployment). On a deployed system, see [Troubleshoot solution updates for Azure Local](https://learn.microsoft.com/azure/azure-local/update/update-troubleshooting-23h2). |
 | `SOLUTION_UPDATE_NOT_RESUMED` | The update did not start again. The script prints the reason. | Retry the update the same way you started it. If it still does not start, [contact Microsoft support](#when-to-contact-microsoft-support). |
-| `RETRY_BLOCKED` | A machine still has an external copy, is missing the inbox module, or could not be checked. The script names each one. | Run Steps 1 to 6 on each named machine, including the restart if its Step 5 printed `RESTART_REQUIRED`, and run this script again. If a machine could not be checked, run [Verify the fix](#verify-the-fix) on that machine. |
+| `RETRY_BLOCKED` | A machine still has an external copy, is missing the inbox module, or could not be checked. The script names each one. | Run Steps 1 to 6 on each named machine, then run this script again. If a machine could not be checked, run [Verify the fix](#verify-the-fix) on that machine. |
 
 ## Rollback
 
