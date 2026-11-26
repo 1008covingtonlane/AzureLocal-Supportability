@@ -177,7 +177,7 @@ Run these steps in order on each affected machine. Each script checks or changes
 
 ### Step 1: Find the processes that hold the external copy's files
 
-This step changes nothing. It asks Windows Restart Manager which processes hold files in the external copy's version-number folders, and lists each one with its owner, start time, and command line. Restart Manager reports these processes even though the module list that `Get-Process` shows does not include them, because PowerShell loads the module's .NET files in a way that is not listed there. Remote PowerShell sessions appear as `wsmprovhost`. Paste or run the whole block at once.
+This step changes nothing. It asks Windows Restart Manager which processes hold files in the external copy's version-number folders, and lists each one with its owner, start time, and command line. Windows Restart Manager reports these processes even though the module list that `Get-Process` shows does not include them, because PowerShell loads the module's .NET files in a way that is not listed there. Remote PowerShell sessions appear as `wsmprovhost`. Paste or run the whole block at once.
 
 ```powershell
 & {
@@ -291,7 +291,7 @@ The first line of the output is the result:
 | --- | --- | --- |
 | `LOCKING_SESSIONS_FOUND` | The listed processes hold files from the external copy. `NextStep` says which ones Step 2 stops. Check each `Owner` and `CommandLine` before you continue. | Go to Step 2. |
 | `NO_LOCKING_SESSIONS` | No process holds the files. | Go to Step 2. It has nothing to stop. |
-| `LOCK_CHECK_UNAVAILABLE` | Windows did not allow the Restart Manager check to run in this PowerShell session, so the script lists every PowerShell process instead, and Step 2 stops nothing. | Close the PowerShell windows and remote sessions that you or your team opened to run the Environment Checker, then go to Step 2. |
+| `LOCK_CHECK_UNAVAILABLE` | Windows did not allow the Restart Manager check to run in this PowerShell session, so the script lists every PowerShell process instead, and Step 2 stops nothing. The cleanup in Step 4 still removes the copy's module manifest, so the copy stops loading even if some files stay in use. | Go to Step 2. |
 
 ### Step 2: Stop the PowerShell sessions that hold the files
 
@@ -647,7 +647,7 @@ Run this script on one machine. It first runs the same check as [Verify the fix]
         $notClean | ForEach-Object { "Nothing was retried. $_" }
     } elseif (-not $clusterExists) {
         Write-Output "CLUSTER_NOT_DEPLOYED"
-        Write-Output "The cluster does not exist yet, so only this machine was checked. When Verify the fix prints THIS_MACHINE_CLEAN on every machine, resume the deployment: open your Azure Local instance, go to Deployments, and select Resume deployment."
+        Write-Output "The cluster does not exist yet, so only this machine was checked. Run Verify the fix on every machine. When every machine is clean, resume the deployment: open your Azure Local instance, go to Deployments, and select Resume deployment."
     } else {
         $updates = $null
         $updateError = $null
