@@ -182,8 +182,8 @@ When you contact Microsoft Support, include the Support.AksArc module version, y
 ```powershell
 Start-Transcript -Path "$env:USERPROFILE\Desktop\Support-AksArc-$(Get-Date -Format yyyyMMdd-HHmmss).txt"
 Import-Module -Name Support.AksArc
-Get-Module -Name Support.AksArc | Select-Object Name, Version
-Get-SolutionUpdateEnvironment | Select-Object CurrentVersion
-Test-SupportAksArcKnownIssues
+Get-Module -Name Support.AksArc | Select-Object Name, Version | Out-Host
+Get-SolutionUpdateEnvironment | Select-Object CurrentVersion | Out-Host
+Test-SupportAksArcKnownIssues | Out-Host
 Stop-Transcript
 ```
