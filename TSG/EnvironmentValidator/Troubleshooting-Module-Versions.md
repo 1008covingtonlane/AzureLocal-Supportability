@@ -757,7 +757,8 @@ Run this script on one machine, after [Verify the fix](#verify-the-fix) printed 
     } else {
         $updates = $null
         $updateError = $null
-        try { $updates = @(Get-SolutionUpdate -ErrorAction Stop) }
+        Import-Module -Name Microsoft.AzureStack.Lcm.PowerShell -ErrorAction SilentlyContinue 4>$null
+        try { $updates = @(Get-SolutionUpdate -ErrorAction Stop 4>$null) }
         catch { $updateError = $_.Exception.Message }
         if ($null -eq $updates) {
             Write-Output "UPDATE_SERVICE_NOT_AVAILABLE"
@@ -768,11 +769,11 @@ Run this script on one machine, after [Verify the fix](#verify-the-fix) printed 
             $failed = @($updates | Where-Object { $_.State -eq 'InstallationFailed' })
             if ($failed.Count -eq 1) {
                 try {
-                    $run = $failed[0] | Start-SolutionUpdate -ErrorAction Stop
+                    $run = $failed[0] | Start-SolutionUpdate -ErrorAction Stop 4>$null
                     Write-Output "SOLUTION_UPDATE_RESUMED"
                     Write-Output "Resumed $($failed[0].DisplayName). Update run: $run"
                 } catch {
-                    $state = (Get-SolutionUpdate -Id $failed[0].ResourceId -ErrorAction SilentlyContinue).State
+                    $state = (Get-SolutionUpdate -Id $failed[0].ResourceId -ErrorAction SilentlyContinue 4>$null).State
                     if ($state -eq 'Installing') {
                         Write-Output "SOLUTION_UPDATE_RESUMED"
                         Write-Output "$($failed[0].DisplayName) is already installing again."
@@ -789,7 +790,7 @@ Run this script on one machine, after [Verify the fix](#verify-the-fix) printed 
                 Write-Output "No solution update failed during installation. Retry the operation that failed the same way you started it. An update that shows HealthCheckFailed failed in its readiness check: select Try again on it, or run the same Start-SolutionUpdate command again."
             }
             $notCheckedLines
-            Get-SolutionUpdate -ErrorAction SilentlyContinue | Format-Table DisplayName, Version, State -AutoSize
+            Get-SolutionUpdate -ErrorAction SilentlyContinue 4>$null | Format-Table DisplayName, Version, State -AutoSize
         }
     }
 }
