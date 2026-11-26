@@ -703,14 +703,19 @@ Do not use the system health check to confirm this fix. It can keep showing a pr
 
 ## Retry the failed operation
 
-Run this script on one machine, after [Verify the fix](#verify-the-fix) printed `ALL_MACHINES_CLEAN`, or printed `THIS_MACHINE_CLEAN` on every machine. It first checks this machine and every other machine that it can reach, the same way as Verify the fix, and it retries nothing if one of them is not clean. It then resumes a solution update that failed during installation. For any other operation, it prints how to retry it. Paste or run the whole block at once.
+Run this script on one machine, after [Verify the fix](#verify-the-fix) printed `ALL_MACHINES_CLEAN`, or printed `THIS_MACHINE_CLEAN` on every machine. It first checks this machine and every other machine that it can reach, the same way as Verify the fix, and it retries nothing if one of them is not clean. It then resumes a solution update whose installation failed with the error in this article. For any other operation, it prints how to retry it. Paste or run the whole block at once.
 
-**Changes:** resumes the update only when this machine and every machine that the script can reach are clean, and exactly one update is in the `InstallationFailed` state. The update continues from the step that failed. In every other case the script changes nothing.
+**Changes:** resumes the update only when this machine and every machine that the script can reach are clean, no update is installing, preparing, or running health checks, and exactly one update is in the `InstallationFailed` state with the error from [Symptoms](#symptoms) in its last run. The update continues from the step that failed. In every other case the script changes nothing.
 
 **Plan for:** the rest of the update installation, including any machine restarts that the update performs, as when you first started it.
 
 ```powershell
 & {
+    if ($PSVersionTable.PSEdition -ne 'Desktop') {
+        Write-Output "WINDOWS_POWERSHELL_REQUIRED"
+        Write-Output "Nothing was retried. Run this in Windows PowerShell 5.1 (powershell.exe), not in PowerShell 7."
+        return
+    }
     $moduleName = "AzStackHci.EnvironmentChecker"
     $checkMachine = {
         param($Name)
@@ -768,8 +773,22 @@ Run this script on one machine, after [Verify the fix](#verify-the-fix) printed 
             Write-Output "If a deployment failed, resume it: open your Azure Local instance, go to Deployments, and select Resume deployment."
             $notCheckedLines
         } else {
+            $active = @($updates | Where-Object { 'Installing', 'Preparing', 'HealthChecking' -contains $_.State })
             $failed = @($updates | Where-Object { $_.State -eq 'InstallationFailed' })
+            $related = $false
             if ($failed.Count -eq 1) {
+                try {
+                    $lastRun = @($failed[0] | Get-SolutionUpdateRun -ErrorAction Stop 4>$null | Sort-Object -Property TimeStarted)[-1]
+                    $related = ($lastRun | ConvertTo-Json -Depth 50 -Compress) -match 'envchkrversiontsg|module names .{0,12}AzStackHci\.EnvironmentChecker'
+                } catch { }
+            }
+            if ($active.Count -gt 0) {
+                Write-Output "ALREADY_IN_PROGRESS"
+                Write-Output "$($active[0].DisplayName) is $($active[0].State), so nothing was resumed."
+            } elseif ($failed.Count -eq 1 -and -not $related) {
+                Write-Output "UPDATE_FAILED_FOR_OTHER_REASON"
+                Write-Output "The last run of $($failed[0].DisplayName) did not fail with the error in this article, or its error could not be read, so it was not resumed."
+            } elseif ($failed.Count -eq 1) {
                 try {
                     $run = $failed[0] | Start-SolutionUpdate -ErrorAction Stop 4>$null
                     Write-Output "SOLUTION_UPDATE_RESUMED"
@@ -810,6 +829,9 @@ Run this script on one machine, after [Verify the fix](#verify-the-fix) printed 
 | Result | Meaning | What to do |
 | --- | --- | --- |
 | `SOLUTION_UPDATE_RESUMED` | The update is installing again. Its `State` in the list is `Installing`. If you run this script on several machines at the same time, one of them resumes the update and the others report that it is already installing. | Follow its progress under **Updates** for your Azure Local instance. It should continue past the step that failed. |
+| `ALREADY_IN_PROGRESS` | An update is already installing, preparing, or running health checks, so nothing was resumed. | Follow its progress under **Updates** for your Azure Local instance. |
+| `UPDATE_FAILED_FOR_OTHER_REASON` | The failed update's last run does not show the error from [Symptoms](#symptoms), or its error could not be read, so the script did not resume it. | Check the error under **Updates**. If it is the error from [Symptoms](#symptoms), select **Try again**. Otherwise, see [Troubleshoot solution updates for Azure Local](https://learn.microsoft.com/azure/azure-local/update/update-troubleshooting-23h2). |
+| `WINDOWS_POWERSHELL_REQUIRED` | The script ran in PowerShell 7 and did nothing. | Run it in Windows PowerShell 5.1. |
 | `NO_UPDATE_TO_RESUME` | No solution update failed during installation, so nothing was resumed. The script prints how to retry other operations, including an update that failed in its readiness check (`HealthCheckFailed`). | Retry the operation that failed the same way you started it. If you started a readiness check with `Start-SolutionUpdate -PrepareOnly`, use the same command again. |
 | `CLUSTER_NOT_DEPLOYED` | The cluster does not exist yet, so the failed operation is a deployment. Only this machine was checked. | Confirm with [Verify the fix](#verify-the-fix) that every machine prints `THIS_MACHINE_CLEAN`, then resume the deployment as described in [Resume deployment](https://learn.microsoft.com/azure/azure-local/deploy/deploy-via-portal#resume-deployment). |
 | `UPDATE_SERVICE_NOT_AVAILABLE` | The cluster exists, but the solution update service did not answer. This can happen when a deployment failed after the cluster was created. | For a deployment, see [Resume deployment](https://learn.microsoft.com/azure/azure-local/deploy/deploy-via-portal#resume-deployment). On a deployed system, see [Troubleshoot solution updates for Azure Local](https://learn.microsoft.com/azure/azure-local/update/update-troubleshooting-23h2). |
