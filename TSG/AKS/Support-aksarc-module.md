@@ -139,7 +139,20 @@ It doesn't restart the Failover Cluster service or the Hyper-V Virtual Machine M
 **Plan for:** Azure Local VM and AKS Arc management operations, such as creating, changing, or deleting a VM, can fail while MOC agents restart or MOC updates. Apart from removing VMs that failed to delete, the fixes work on the MOC infrastructure, not on running VMs. Machines that are Down or Paused aren't fixed. Run the command in a maintenance window.
 
 > [!WARNING]
-> The module doesn't undo its fixes. An MOC update stays in place. If the test `Validate Virtual Machine Stuck In Deleting Due To OS Disk Lock` failed, the fix stops and removes every VM that its message lists. Before you run the command, read that message and confirm that you meant to delete those VMs. If you didn't, run the block that skips that test, after this command, instead.
+> The module doesn't undo its fixes. An MOC update stays in place. If the test `Validate Virtual Machine Stuck In Deleting Due To OS Disk Lock` failed, the fix stops and removes every VM that its message lists.
+
+First, check whether the fix would remove VMs. This check runs only that test and changes nothing:
+
+```powershell
+$vmTest = @(Test-SupportAksArcKnownIssues -TestId MOC-0017)
+if ($vmTest.Count -eq 0) { 'TEST-DID-NOT-RUN' }
+elseif (@($vmTest | Where-Object { $_.Status -in 'Failed', 'Error' }).Count -gt 0) { 'VM-REMOVAL-PENDING'; $vmTest | Format-List TestName, Status, Message }
+else { 'NO-VM-REMOVAL' }
+```
+
+- `NO-VM-REMOVAL`: run the command below.
+- `VM-REMOVAL-PENDING`: the command below would stop and remove the VMs that the message lists. Run the block that skips that test, after the command below, instead.
+- `TEST-DID-NOT-RUN`: the test ran no checks. Use the results table above to find out why.
 
 ```powershell
 if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Run this command in Windows PowerShell 5.1 (powershell.exe), not PowerShell 7.' }
@@ -149,7 +162,7 @@ Invoke-SupportAksArcRemediation
 
 For each test, the command prints either `No remediation required for <test>.`, or `Remediation for <test> is required.` and then `Remediation for <test> succeeded.` or the warning `Remediation for <test> failed.` Some tests have no automatic fix. For those, the command prints `Auto Remediation not available. Please Restart the Node manually, which has the issue` and still reports success, but it changed nothing. Restart the machine named in the test message as described in [Suspend and resume Azure Local machines for maintenance](https://learn.microsoft.com/azure/azure-local/manage/suspend-resume-cluster-maintenance), or contact Microsoft Support.
 
-To fix every failed test except `Validate Virtual Machine Stuck In Deleting Due To OS Disk Lock`, which removes VMs, run this block instead of the command above. It runs the test and reads each test's ID from its `Running test: <test name> with ID: <ID>` line. Then it runs the remediation for each test that failed, had an error, or stopped the run as a critical test, except `MOC-0017`. It prints:
+If the check printed `VM-REMOVAL-PENDING`, run this block instead of the command above. It fixes every failed test except `Validate Virtual Machine Stuck In Deleting Due To OS Disk Lock`, which removes VMs. It runs the test and reads each test's ID from its `Running test: <test name> with ID: <ID>` line. Then it runs the remediation for each test that failed, had an error, or stopped the run as a critical test, except `MOC-0017`. It prints:
 
 - `REMEDIATE <ID>` before each fix;
 - `SKIPPED MOC-0017` if it left that test alone;
