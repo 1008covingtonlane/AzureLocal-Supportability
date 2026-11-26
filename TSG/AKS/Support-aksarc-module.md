@@ -160,7 +160,7 @@ Invoke-SupportAksArcRemediation
 
 ```
 
-For each test, the command prints either `No remediation required for <test>.`, or `Remediation for <test> is required.` and then `Remediation for <test> succeeded.` or the warning `Remediation for <test> failed.` Some tests have no automatic fix. For those, the command prints `Auto Remediation not available. Please Restart the Node manually, which has the issue` and still reports success, but it changed nothing. Restart the machine named in the test message as described in [Suspend and resume Azure Local machines for maintenance](https://learn.microsoft.com/azure/azure-local/manage/suspend-resume-cluster-maintenance), or contact Microsoft Support.
+For each test, the command prints either `No remediation required for <test>.`, or `Remediation for <test> is required.` and then `Remediation for <test> succeeded.` or the warning `Remediation for <test> failed.` Two tests have no automatic fix; see [If a test has no automatic fix](#if-a-test-has-no-automatic-fix).
 
 If the check printed `VM-REMOVAL-PENDING`, run this block instead of the command above. It fixes every failed test except `Validate Virtual Machine Stuck In Deleting Due To OS Disk Lock`, which removes VMs. It runs the test and reads each test's ID from its `Running test: <test name> with ID: <ID>` line. Then it runs the remediation for each test that failed, had an error, or stopped the run as a critical test, except `MOC-0017`. It prints:
 
@@ -185,6 +185,30 @@ foreach ($id in $failed) {
     Invoke-SupportAksArcRemediation -TestId $id
 }
 ```
+
+### If a test has no automatic fix
+
+The tests `Failover Cluster service not responsive or not running` (`FC-0011`) and `Virtual Machine Management service not responsive or not running` (`VMMS-0012`) have no automatic fix. For them, the remediation command prints `Auto Remediation not available. Please Restart the Node manually, which has the issue` and still reports success, but it changes nothing.
+
+After any remediation, run this check. It runs only those two tests and changes nothing:
+
+```powershell
+$fcErrors = $null
+$rows = @(Test-SupportAksArcKnownIssues -TestId FC-0011 -ErrorVariable fcErrors) + @(Test-SupportAksArcKnownIssues -TestId VMMS-0012)
+$critical = @($fcErrors | Where-Object { "$_" -match '^Critical Test ' })
+$failed = @($rows | Where-Object { $_.Status -in 'Failed', 'Error' })
+if ($critical.Count -eq 0 -and $rows.Count -eq 0) { 'TEST-DID-NOT-RUN' }
+elseif ($critical.Count -gt 0 -or $failed.Count -gt 0) { 'MANUAL-RESTART-NEEDED'; $critical | ForEach-Object { "$_" }; $failed | Format-List TestName, Status, Message }
+else { 'NO-MANUAL-RESTART' }
+```
+
+- `NO-MANUAL-RESTART`: continue with [Verify the fix](#verify-the-fix).
+- `MANUAL-RESTART-NEEDED`: the message names the machine. Restart that machine as described in [Suspend and resume Azure Local machines for maintenance](https://learn.microsoft.com/azure/azure-local/manage/suspend-resume-cluster-maintenance), then run this check again. If it still prints `MANUAL-RESTART-NEEDED`, contact Microsoft Support.
+- `TEST-DID-NOT-RUN`: the tests ran no checks. Use the results table above to find out why.
+
+**Changes:** the restart moves the machine's workloads to other machines, restarts it, and returns it to the instance.
+
+**Plan for:** the instance runs with one machine fewer until the restart finishes. Restart in a maintenance window.
 
 ### Verify the fix
 
