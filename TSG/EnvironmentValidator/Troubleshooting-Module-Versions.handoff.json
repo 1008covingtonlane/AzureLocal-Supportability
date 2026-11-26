@@ -1,0 +1,91 @@
+{
+  "schema": "tsg-forge-handoff/v1",
+  "generator": {
+    "tool": "tsg-forge",
+    "module": "make_sidecar.py",
+    "classifier": "written to the tsg-forge-handoff/v1 contract"
+  },
+  "source": {
+    "sha256": "3aeba994427b630b4b601f155860039ce73587b8379143528acdbdb11f5f33f6",
+    "path": "TSG/EnvironmentValidator/Troubleshooting-Module-Versions.md"
+  },
+  "article": {
+    "title": "Troubleshoot Environment Checker module versions",
+    "surface": "on-device",
+    "catalog": "eligible"
+  },
+  "handoffs": [
+    {
+      "id": "H1",
+      "kind": "operator-handoff",
+      "binding": {
+        "step": "S3",
+        "section": "Mitigation Details > Step 3: Close the other programs that hold the files",
+        "path": [
+          "Troubleshoot Environment Checker module versions",
+          "Mitigation Details",
+          "Step 3: Close the other programs that hold the files"
+        ],
+        "line": 442,
+        "class": "operator-required",
+        "needs": [],
+        "source_sha256": "15edba6ad6358fbe6e6c8c717c38b87527f3e479c4f2a4b6b6d2dc777b2519e0"
+      },
+      "reason": "A person must decide whether it is safe to end another program or sign its user out.",
+      "article_reason": [
+        "Step 2 does not stop programs that are not PowerShell sessions or that run a Windows service, because only a person can tell whether it is safe to end them."
+      ],
+      "run_on": "off-node",
+      "families": [],
+      "instructions": {
+        "text": "Do this step only if Step 1 printed `OTHER_HOLDERS_FOUND`. If it printed anything else, there is nothing to close.\n\n1. Close each program that Step 1 lists as not stopped by Step 2, or ask the user shown as its owner to close it.\n2. If that user is not available, sign the user out of this machine with the `logoff` command and the session ID that Step 1 shows for the program.\n3. Leave a program running if it runs a Windows service or if you cannot close it. The cleanup in Step 5 removes what it can, and Step 6 tells you whether a restart is needed."
+      },
+      "parameters": [],
+      "verify": {
+        "status": "bound",
+        "read_only": true,
+        "criterion": "Step 4 prints FILES_RELEASED.",
+        "commands": [
+          {
+            "surface": "powershell",
+            "text": "& {\n    $moduleRoot = Join-Path $env:ProgramFiles 'WindowsPowerShell\\Modules\\AzStackHci.EnvironmentChecker'\n    $files = @(Get-ChildItem -Path $moduleRoot -Directory -ErrorAction SilentlyContinue |\n        Where-Object { $_.Name -as [version] } |\n        ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Recurse -File -Force -ErrorAction SilentlyContinue } |\n        ForEach-Object { $_.FullName })\n    $inUse = @()\n    $checkError = $null\n    foreach ($file in $files) {\n        try {\n            $stream = [System.IO.File]::Open($file, 'Open', 'ReadWrite', 'None')\n            $stream.Close()\n        }\n        catch [System.IO.IOException] { if (Test-Path -LiteralPath $file) { $inUse += $file } }\n        catch [System.UnauthorizedAccessException] { $inUse += $file }\n        catch { $checkError = $_.Exception.Message; break }\n    }\n    if ($checkError) {\n        Write-Output 'LOCK_CHECK_UNAVAILABLE'\n        Write-Output \"The check could not run in this PowerShell session: $checkError\"\n    }\n    elseif ($files.Count -eq 0) {\n        Write-Output 'NO_FILES_TO_CHECK'\n        Write-Output 'This machine has no files in version-number folders of the module.'\n    }\n    elseif ($inUse.Count -gt 0) {\n        Write-Output 'FILES_IN_USE'\n        $inUse | ForEach-Object { \"In use: $_\" }\n        Write-Output 'Run the Step 1 script again to see which processes hold these files.'\n    }\n    else {\n        Write-Output 'FILES_RELEASED'\n        Write-Output \"No file in the external copy's version-number folders is in use ($($files.Count) files checked).\"\n    }\n}",
+            "read_only": true,
+            "handles_secret": false,
+            "run_on": "node",
+            "parameters": [],
+            "pass_when": [
+              "Expect `FILES_RELEASED`."
+            ],
+            "success_tokens": [
+              "FILES_RELEASED"
+            ],
+            "source": {
+              "section": "Mitigation Details > Step 4: Confirm that the files are released",
+              "line": 455,
+              "kind": "code",
+              "sha256": "6fcd521bc039c4464e372645f9a21a3e6f46094c81264ddeaa94912543e74f38"
+            }
+          }
+        ]
+      },
+      "prechecks": [],
+      "on_verify_fail": {
+        "action": "explain-and-reprompt",
+        "max_reprompts": 2,
+        "then": "stop"
+      },
+      "timeout": {
+        "confirm": "PT30M",
+        "on_timeout": "suspend"
+      },
+      "actor": {
+        "allowed": [
+          "human"
+        ],
+        "record": true
+      }
+    }
+  ],
+  "run_on_peer": [],
+  "findings": []
+}
