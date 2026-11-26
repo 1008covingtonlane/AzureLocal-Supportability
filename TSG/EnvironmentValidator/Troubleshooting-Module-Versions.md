@@ -44,7 +44,7 @@
 | Date | Summary |
 | --- | --- |
 | 2026-11-20 | Corrected the expected inbox module path and the Issue Validation command. Added the error that newer builds show, steps for module files that are still in use, commands for all machines, and guidance to verify, escalate, and prevent the problem. Added the metadata marker. Step 1 now lists every PowerShell session that could hold the external copy's files, including remote sessions, and the impact labels are replaced with plain statements of what each step changes. |
-| 2026-11-26 | Corrected the statement that Windows cannot report which process holds the module's files: Step 1 now uses Windows Restart Manager to list the exact processes, and Step 2 stops only the PowerShell sessions in that list, after you review it. Every script now prints a result line. Step 5 checks whether a restart is needed and prints how to restart the machine safely. Verify the fix checks every machine, and a solution update that failed during installation can be resumed with one script once every machine is clean. Added that deployment and updates can leave copies behind, and that the scripts need a full language PowerShell session. |
+| 2026-11-26 | Corrected the statement that Windows cannot report which process holds the module's files: Step 1 now uses Windows Restart Manager to list the exact processes, and Step 2 stops only the PowerShell sessions in that list, after you review it. Every script now prints a result line. Step 5 checks whether a restart is needed and prints how to restart the machine safely. Verify the fix checks every machine, and a solution update that failed during installation can be resumed with one script once every machine is clean. Added that deployment and updates can leave copies behind, that Azure Local removes extra copies only on the machine where the Orchestrator Service is running, and that the scripts need a full language PowerShell session. |
 
 ## At a glance
 
@@ -61,7 +61,7 @@
 
 ## Overview
 
-Azure Local ships its own copy of the Environment Checker PowerShell module, called the inbox module. The same module is also published on the PowerShell Gallery so that you can run readiness checks before deployment. The inbox version must be the one that loads, so before a deployment, update, upgrade, add node, or repair node operation, Azure Local tries to remove every other copy.
+Azure Local ships its own copy of the Environment Checker PowerShell module, called the inbox module. The same module is also published on the PowerShell Gallery so that you can run readiness checks before deployment. The inbox version must be the one that loads, so before a deployment, update, upgrade, add node, or repair node operation, Azure Local tries to remove every other copy, but only on the machine where the Azure Stack HCI Orchestrator Service is running at the time. Copies on the other machines stay until the service runs these checks there, or until you remove them with the steps below, so check every machine.
 
 If you installed the module from the PowerShell Gallery, remove it after use (see [Prevention](#prevention)). When you troubleshoot a related issue, removing the extra copy first also makes the results easier to read.
 
@@ -80,7 +80,7 @@ Type 'ValidateConnectivity' of Role 'EnvironmentValidator' raised an exception:
 }
 ```
 
-**Newer builds** (confirmed on Environment Checker 10.2510.0.2100): Azure Local removes the extra copy by itself and fails only when it cannot delete the files, usually because a PowerShell session still has the module loaded. The error links to this article. For example (the version folder and file name vary):
+**Newer builds** (confirmed on Environment Checker 10.2510.0.2100): Azure Local removes the extra copy by itself on the machine running the Orchestrator Service, and fails only when it cannot delete the files, usually because a PowerShell session still has the module loaded. The error links to this article. For example (the version folder and file name vary):
 
 ```text
 Unable to remove module files at C:\Program Files\WindowsPowerShell\Modules\AzStackHci.EnvironmentChecker\1.0.0. Error: Access to the path 'Microsoft.AzureStack.Observability.Standalone.dll' is denied.. Please follow https://aka.ms/envchkrversiontsg to remove the module manually before retrying lifecycle operation.
