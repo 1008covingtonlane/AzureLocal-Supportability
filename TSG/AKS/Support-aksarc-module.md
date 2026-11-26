@@ -139,7 +139,7 @@ It doesn't restart the Failover Cluster service or the Hyper-V Virtual Machine M
 **Plan for:** Azure Local VM and AKS Arc management operations, such as creating, changing, or deleting a VM, can fail while MOC agents restart or MOC updates. Apart from removing VMs that failed to delete, the fixes work on the MOC infrastructure, not on running VMs. Machines that are Down or Paused aren't fixed. Run the command in a maintenance window.
 
 > [!WARNING]
-> The module doesn't undo its fixes. An MOC update stays in place. If the test `Validate Virtual Machine Stuck In Deleting Due To OS Disk Lock` failed, the fix stops and removes every VM that its message lists. Before you run the command, read that message and confirm that you meant to delete those VMs. If you didn't, fix only the other failing tests, one at a time, as described after this command.
+> The module doesn't undo its fixes. An MOC update stays in place. If the test `Validate Virtual Machine Stuck In Deleting Due To OS Disk Lock` failed, the fix stops and removes every VM that its message lists. Before you run the command, read that message and confirm that you meant to delete those VMs. If you didn't, run the block that skips that test, after this command, instead.
 
 ```powershell
 if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Run this command in Windows PowerShell 5.1 (powershell.exe), not PowerShell 7.' }
@@ -149,13 +149,28 @@ Invoke-SupportAksArcRemediation
 
 For each test, the command prints either `No remediation required for <test>.`, or `Remediation for <test> is required.` and then `Remediation for <test> succeeded.` or the warning `Remediation for <test> failed.` Some tests have no automatic fix. For those, the command prints `Auto Remediation not available. Please Restart the Node manually, which has the issue` and still reports success, but it changed nothing. Restart the machine named in the test message as described in [Suspend and resume Azure Local machines for maintenance](https://learn.microsoft.com/azure/azure-local/manage/suspend-resume-cluster-maintenance), or contact Microsoft Support.
 
-To fix one test only, find its ID in the `Running test: <test name> with ID: <ID>` line of the test output, for example `MOC-0018`, and run the remediation for that ID.
+To fix every failed test except `Validate Virtual Machine Stuck In Deleting Due To OS Disk Lock`, which removes VMs, run this block instead of the command above. It runs the test and reads each test's ID from its `Running test: <test name> with ID: <ID>` line. Then it runs the remediation for each test that failed, had an error, or stopped the run as a critical test, except `MOC-0017`. It prints:
 
-**Changes:** applies only that test's fix, from the list above.
+- `REMEDIATE <ID>` before each fix;
+- `SKIPPED MOC-0017` if it left that test alone;
+- `NO-FAILED-TESTS` if no test needed a fix;
+- `TEST-DID-NOT-RUN` if the test ran no checks. Use the results table above to find out why.
+
+**Changes:** applies the fixes listed above for the failed tests only, one test at a time, and never removes VMs.
 
 ```powershell
 if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Run this command in Windows PowerShell 5.1 (powershell.exe), not PowerShell 7.' }
-Invoke-SupportAksArcRemediation -TestId <ID>
+$info = $null
+$results = @(Test-SupportAksArcKnownIssues -InformationVariable info)
+$ids = @($info | ForEach-Object { [regex]::Match([string]$_.MessageData, '^Running test: .+ with ID: ((MOC|FC|VMMS)-\d{4})$') } | Where-Object { $_.Success } | ForEach-Object { $_.Groups[1].Value })
+$failed = @(for ($i = 0; $i -lt $ids.Count; $i++) { if ($i -ge $results.Count -or $results[$i].Status -in 'Failed', 'Error') { $ids[$i] } })
+if ($ids.Count -eq 0) { 'TEST-DID-NOT-RUN' }
+elseif ($failed.Count -eq 0) { 'NO-FAILED-TESTS' }
+foreach ($id in $failed) {
+    if ($id -eq 'MOC-0017') { 'SKIPPED MOC-0017'; continue }
+    "REMEDIATE $id"
+    Invoke-SupportAksArcRemediation -TestId $id
+}
 ```
 
 ### Verify the fix
