@@ -496,24 +496,34 @@ Invoke-Command -ComputerName $nodes -FilePath .\Remove-ExternalEnvChecker.ps1
 
 ### Step 5: Check whether a restart is needed
 
-This step changes nothing. A restart is needed only in the rare case where Step 4 printed `CLEANUP_EXTERNAL_REMAINS`, because a process that Step 2 does not stop still holds the copy's module manifest. The script checks for that case again.
+This step changes nothing. A restart is needed only in the rare case where Step 4 printed `CLEANUP_EXTERNAL_REMAINS`, because a process that Step 2 does not stop still holds the copy's module manifest. The script checks for that case again and, when a restart is needed, prints how to restart this machine safely.
 
 ```powershell
 $moduleName = "AzStackHci.EnvironmentChecker"
 $remaining = @(Get-Module -Name $moduleName -ListAvailable | Where-Object {$_.Path -like "*$($_.Version)*"})
-if ($remaining.Count -gt 0) {
+if ($remaining.Count -eq 0) {
+    Write-Output "NO_RESTART_NEEDED"
+} else {
     Write-Output "RESTART_REQUIRED"
     $remaining | ForEach-Object { "Still listed: $($_.Path)" }
-    "Restart this machine to release the files, then run Steps 4, 5, and 6 again. On a cluster with more than one machine, pause and drain it first. On a single-machine instance, plan a maintenance window, because the restart stops all VMs."
-} else {
-    Write-Output "NO_RESTART_NEEDED"
+    $machineCount = @(Get-ClusterNode -ErrorAction SilentlyContinue).Count
+    if ($machineCount -gt 1) {
+        "This machine is in a cluster of $machineCount machines. Pause and drain it before the restart, and resume it afterward: https://learn.microsoft.com/azure/azure-local/manage/suspend-resume-cluster-maintenance"
+    } elseif ($machineCount -eq 1) {
+        "This is a single-machine instance. The restart stops all running VMs, so plan a maintenance window and shut down or save the VMs first."
+    } else {
+        "The cluster does not exist yet, so restart this machine normally."
+    }
+    "After the restart, run Steps 4, 5, and 6 again."
 }
 ```
 
 | Result | Meaning | What to do |
 | --- | --- | --- |
 | `NO_RESTART_NEEDED` | The external copy no longer loads. | Go to Step 6. |
-| `RESTART_REQUIRED` | The external copy is still listed, and only a restart releases the files that hold it. Until then, Step 6 cannot delete the copy and the retry script retries nothing. | Restart this machine, then run Steps 4, 5, and 6 again. On a deployed cluster with more than one machine, first pause and drain it as described in [Suspend and resume Azure Local machines for planned maintenance](https://learn.microsoft.com/azure/azure-local/manage/suspend-resume-cluster-maintenance), and resume it afterward. On a single-machine instance, there is no other machine to drain to: plan a maintenance window, and shut down or save the VMs first. Before the cluster exists (during deployment), restart the machine normally. |
+| `RESTART_REQUIRED` | The external copy is still listed, and only a restart releases the files that hold it. Until then, Step 6 deletes nothing and the retry script retries nothing. | Restart the machine as the script describes. |
+
+How the restart works: on a deployed cluster with more than one machine, the machine is paused and drained first so its VMs move to other machines, as described in [Suspend and resume Azure Local machines for planned maintenance](https://learn.microsoft.com/azure/azure-local/manage/suspend-resume-cluster-maintenance), and it is resumed afterward. A single-machine instance has no other machine to drain to, so its restart needs a maintenance window. Before the cluster exists (during deployment), the machine restarts normally.
 
 **Plan for:** a maintenance window if a single-machine instance needs the restart.
 
@@ -522,14 +532,18 @@ if ($remaining.Count -gt 0) {
 
 ### Step 6: Delete leftover folders
 
-**Changes:** deletes only subfolders whose name is a version number. The inbox files are not in such a subfolder and are not touched. When the inbox module is missing, the script deletes nothing.
+**Changes:** deletes only subfolders whose name is a version number. The inbox files are not in such a subfolder and are not touched. The script deletes nothing when the inbox module is missing or while an external copy still loads.
 
 ```powershell
 $moduleName = "AzStackHci.EnvironmentChecker"
 $root = Join-Path $env:ProgramFiles "WindowsPowerShell\Modules\$moduleName"
-if (-not (Get-Module -Name $moduleName -ListAvailable | Where-Object {$_.Path -notlike "*$($_.Version)*"})) {
+$available = @(Get-Module -Name $moduleName -ListAvailable)
+if (@($available | Where-Object {$_.Path -notlike "*$($_.Version)*"}).Count -eq 0) {
     Write-Output "INBOX_MODULE_MISSING"
     Write-Output "The inbox module is missing, so nothing was deleted."
+} elseif (@($available | Where-Object {$_.Path -like "*$($_.Version)*"}).Count -gt 0) {
+    Write-Output "RESTART_REQUIRED"
+    Write-Output "An external copy still loads, so nothing was deleted. Restart this machine as Step 5 describes, then run Steps 4, 5, and 6 again."
 } else {
     $leftover = @(Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -as [version] })
     $inUse = @()
@@ -552,7 +566,8 @@ if (-not (Get-Module -Name $moduleName -ListAvailable | Where-Object {$_.Path -n
 | Result | Meaning | What to do |
 | --- | --- | --- |
 | `LEFTOVER_FOLDERS_REMOVED` or `NO_LEFTOVER_FOLDERS` | No version-number folder is left. | Go to [Verify the fix](#verify-the-fix). |
-| `LEFTOVER_FOLDER_IN_USE` | A process that Step 2 does not stop still holds files in the folder. If Step 5 printed `NO_RESTART_NEEDED`, the folder's module manifest is already gone, so it does not load and does not block the operation. | Leave the folder for now and go to [Verify the fix](#verify-the-fix). Run this step again after the machine's next planned restart, rather than restarting the machine for this alone. |
+| `LEFTOVER_FOLDER_IN_USE` | A process that Step 2 does not stop still holds files in the folder. The folder's module manifest is already gone, so it does not load and does not block the operation. | Leave the folder for now and go to [Verify the fix](#verify-the-fix). Run this step again after the machine's next planned restart, rather than restarting the machine for this alone. |
+| `RESTART_REQUIRED` | An external copy still loads, so nothing was deleted. | Restart the machine as Step 5 describes. |
 | `INBOX_MODULE_MISSING` | The inbox module is not listed, so nothing was deleted. | [Contact Microsoft support](#when-to-contact-microsoft-support). |
 
 ## Verify the fix
