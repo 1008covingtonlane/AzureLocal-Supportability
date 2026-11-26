@@ -120,7 +120,7 @@ The system health check (`Invoke-SolutionUpdatePrecheck -SystemHealth`) runs the
 
 - Open PowerShell with **Run as administrator** on each machine.
 - Make sure no update or deployment step is running right now. If an update shows `Installing`, wait for it to stop before you change anything.
-- Use a PowerShell session in full language mode: `$ExecutionContext.SessionState.LanguageMode` returns `FullLanguage`. This is the default on Azure Local, including when Application Control is enforced. In a constrained session, Step 1 reports `LOCK_CHECK_UNAVAILABLE`, and some of the later scripts stop with an error.
+- Use a PowerShell session in full language mode: `$ExecutionContext.SessionState.LanguageMode` returns `FullLanguage`. This is the default on Azure Local, including when Application Control is enforced. In a constrained session, Steps 1 and 4 report `LOCK_CHECK_UNAVAILABLE`, and some of the later scripts stop with an error.
 - Run [Issue Validation](#issue-validation) first. Continue only if it prints `EXTERNAL_COPY_FOUND` or `LEFTOVER_FOLDER_ONLY`.
 - If it prints `INBOX_MODULE_MISSING`, stop and [contact Microsoft support](#when-to-contact-microsoft-support). Do not install a replacement.
 
@@ -449,18 +449,56 @@ Step 2 does not stop programs that are not PowerShell sessions or that run a Win
 
 Do this step only if Step 1 printed `OTHER_HOLDERS_FOUND`; if it printed anything else, there is nothing to close. Close each program that Step 1 lists with `Step 2 does not stop it. See Step 3.` in its `NextStep`, or ask the user shown in its `Owner` to close it. If that user is not available, sign them out of this machine with the `logoff` command and the `SessionId` that Step 1 shows for the program. If the program runs a Windows service (its `Service` field is not empty), or you cannot close it, leave it running: the cleanup in Step 5 removes what it can, and Step 6 tells you whether a restart is needed.
 
-When you are done, go to Step 4. It checks whether any program still holds the files.
+When you are done, go to Step 4. It checks whether the files are still in use.
 
 ### Step 4: Confirm that the files are released
 
-Run the Step 1 script again. This changes nothing.
+This step changes nothing. It opens each file in the external copy's version-number folders for exclusive use, without reading or writing anything, and closes it again at once. A file that cannot be opened this way is still in use. Paste or run the whole block at once.
+
+```powershell
+& {
+    $moduleRoot = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules\AzStackHci.EnvironmentChecker'
+    $files = @(Get-ChildItem -Path $moduleRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -as [version] } |
+        ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Recurse -File -Force -ErrorAction SilentlyContinue } |
+        ForEach-Object { $_.FullName })
+    $inUse = @()
+    $checkError = $null
+    foreach ($file in $files) {
+        try {
+            $stream = [System.IO.File]::Open($file, 'Open', 'ReadWrite', 'None')
+            $stream.Close()
+        }
+        catch [System.IO.IOException] { if (Test-Path -LiteralPath $file) { $inUse += $file } }
+        catch [System.UnauthorizedAccessException] { $inUse += $file }
+        catch { $checkError = $_.Exception.Message; break }
+    }
+    if ($checkError) {
+        Write-Output 'LOCK_CHECK_UNAVAILABLE'
+        Write-Output "The check could not run in this PowerShell session: $checkError"
+    }
+    elseif ($files.Count -eq 0) {
+        Write-Output 'NO_FILES_TO_CHECK'
+        Write-Output 'This machine has no files in version-number folders of the module.'
+    }
+    elseif ($inUse.Count -gt 0) {
+        Write-Output 'FILES_IN_USE'
+        $inUse | ForEach-Object { "In use: $_" }
+        Write-Output 'Run the Step 1 script again to see which processes hold these files.'
+    }
+    else {
+        Write-Output 'FILES_RELEASED'
+        Write-Output "No file in the external copy's version-number folders is in use ($($files.Count) files checked)."
+    }
+}
+```
 
 | Result | Meaning | Next step |
 | --- | --- | --- |
-| `NO_LOCKING_SESSIONS` | No process holds the files. | Go to Step 5. |
-| `OTHER_HOLDERS_FOUND` | A program that Step 2 does not stop still holds files: one that you could not close, or one that runs a Windows service. | Go to Step 5. The cleanup removes everything it can, and Step 6 tells you whether a restart is needed. |
-| `LOCKING_SESSIONS_FOUND` | A PowerShell session holds files: one that started after Step 2 ran, or the window that you are using. Its `NextStep` says which. | Go back to Step 2. |
-| `LOCK_CHECK_UNAVAILABLE` | The check still cannot run in this PowerShell session. | Go to Step 5. |
+| `FILES_RELEASED` | No file of the external copy is in use on this machine. | Go to Step 5. |
+| `FILES_IN_USE` | The script lists the files that are still in use: a program that you could not close, a Windows service, or a PowerShell session that started after Step 2 holds them. The Step 1 script shows which processes they are. | Go to Step 5 if no step can release them. The cleanup removes everything it can, and Step 6 tells you whether a restart is needed. |
+| `NO_FILES_TO_CHECK` | This machine has no files in version-number folders. | Go to Step 5. |
+| `LOCK_CHECK_UNAVAILABLE` | The check could not run in this PowerShell session. | Go to Step 5. |
 
 ### Step 5: Run the cleanup script
 
