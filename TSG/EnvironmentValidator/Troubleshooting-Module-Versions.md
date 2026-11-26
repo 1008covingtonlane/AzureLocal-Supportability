@@ -699,7 +699,7 @@ Run this script on one machine. It first runs the same check as [Verify the fix]
 
 ## Rollback
 
-Normally there is nothing to roll back. Azure Local needs only the inbox module, and it tries to remove every other copy itself before an operation, whether the copy came from the PowerShell Gallery or was left by deployment or an update. If you need the standalone Environment Checker from the PowerShell Gallery again, install it only after the operation completes, and remove it again before the next one, as described in [Prevention](#prevention). If you paused and drained a machine, resume it as described in the pause and drain procedure. Sessions that Step 2 stopped cannot be restored; open new PowerShell sessions if you still need them.
+Normally there is nothing to roll back. Azure Local needs only the inbox module, so a copy you removed does not need to be put back. If you need the standalone Environment Checker from the PowerShell Gallery again, install it only after the operation completes, and remove it again before the next one, as described in [Prevention](#prevention). If you paused and drained a machine, resume it as described in the pause and drain procedure. Sessions that Step 2 stopped cannot be restored; open new PowerShell sessions if you still need them.
 
 ## When to contact Microsoft support
 
