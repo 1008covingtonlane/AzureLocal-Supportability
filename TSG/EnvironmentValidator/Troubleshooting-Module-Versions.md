@@ -120,22 +120,33 @@ The system health check (`Invoke-SolutionUpdatePrecheck -SystemHealth`) runs the
 
 - Open PowerShell with **Run as administrator** on each machine.
 - Make sure no update or deployment step is running right now. If an update shows `Installing`, wait for it to stop before you change anything.
-- Run [Issue Validation](#issue-validation) first. Continue only if it lists an external copy or a leftover version-number folder.
-- If the inbox module is missing from the results, stop and [contact Microsoft support](#when-to-contact-microsoft-support). Do not install a replacement.
+- Run [Issue Validation](#issue-validation) first. Continue only if it prints `EXTERNAL_COPY_FOUND` or `LEFTOVER_FOLDER_ONLY`.
+- If it prints `INBOX_MODULE_MISSING`, stop and [contact Microsoft support](#when-to-contact-microsoft-support). Do not install a replacement.
 
 ## Issue Validation
 
-Run this in an elevated PowerShell session on each machine. It changes nothing; it lists external copies, meaning module copies whose path contains their version number.
+Run this in an elevated PowerShell session on each machine. It changes nothing. It lists external copies, meaning module copies whose path contains their version number, and leftover version-number folders, and its first line is the result.
 
 ```powershell
 $moduleName = "AzStackHci.EnvironmentChecker"
-Get-Module -Name $moduleName -ListAvailable | Where-Object {$_.Path -like "*$($_.Version)*"}
+$root = Join-Path $env:ProgramFiles "WindowsPowerShell\Modules\$moduleName"
+$available = @(Get-Module -Name $moduleName -ListAvailable)
+$external = @($available | Where-Object {$_.Path -like "*$($_.Version)*"})
+$versionFolders = @(Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -as [version] })
+if (@($available | Where-Object {$_.Path -notlike "*$($_.Version)*"}).Count -eq 0) {
+    Write-Output "INBOX_MODULE_MISSING"
+} elseif ($external.Count -gt 0) {
+    Write-Output "EXTERNAL_COPY_FOUND"
+} elseif ($versionFolders.Count -gt 0) {
+    Write-Output "LEFTOVER_FOLDER_ONLY"
+} else {
+    Write-Output "NOT_AFFECTED"
+}
+$external | Format-Table Name, Version, Path -AutoSize
+$versionFolders | ForEach-Object { "Version-number folder: $($_.FullName)" }
 ```
 
-- **Affected:** one or more modules are listed, each with a version-number folder in its path.
-- **Not affected:** no output.
-
-To check every machine at once, run this from one machine. On a deployed cluster, `Get-ClusterNode` lists the machines. Before the cluster exists (during deployment), set `$nodes` to the machine names instead. If PowerShell remoting to a machine fails, run the single-machine command above on that machine instead.
+To check every machine at once, run this from one machine. On a deployed cluster, `Get-ClusterNode` lists the machines. Before the cluster exists (during deployment), set `$nodes` to the machine names instead. If PowerShell remoting to a machine fails, run the single-machine check above on that machine instead.
 
 ```powershell
 $moduleName = "AzStackHci.EnvironmentChecker"
@@ -153,16 +164,16 @@ Invoke-Command -ComputerName $nodes -ScriptBlock {
 
 How to read the output for each machine:
 
-| Result | Meaning | Next step |
-| --- | --- | --- |
-| `ExternalCopies` lists a path | An external copy is present. | Follow Steps 1 to 6 in [Mitigation Details](#mitigation-details). |
-| `ExternalCopies` is empty but `VersionFolders` lists a folder | A leftover folder from a partly removed copy. It no longer loads. | [Step 6](#step-6-delete-leftover-folders). If Step 6 already told you to leave it until the next planned restart, no further action is needed now. |
-| Both are empty and `AllAvailableModules` shows only the inbox path | This machine is not affected. | None. |
-| `AllAvailableModules` does not show the inbox path | The inbox module is missing. | Stop and [contact Microsoft support](#when-to-contact-microsoft-support). |
+| Single-machine result | All-machines output | Meaning | Next step |
+| --- | --- | --- | --- |
+| `EXTERNAL_COPY_FOUND` | `ExternalCopies` lists a path | An external copy is present. | Follow Steps 1 to 6 in [Mitigation Details](#mitigation-details). |
+| `LEFTOVER_FOLDER_ONLY` | `ExternalCopies` is empty but `VersionFolders` lists a folder | A leftover folder from a partly removed copy. It no longer loads. | Follow Steps 1 to 6. Step 4 has nothing to uninstall, and Step 6 deletes the folder. If Step 6 already told you to leave it until the next planned restart, no further action is needed now. |
+| `NOT_AFFECTED` | Both are empty and `AllAvailableModules` shows only the inbox path | This machine is not affected. | None. |
+| `INBOX_MODULE_MISSING` | `AllAvailableModules` does not show the inbox path | The inbox module is missing. | Stop and [contact Microsoft support](#when-to-contact-microsoft-support). Do not install a replacement. The scripts in this article change nothing on a machine without the inbox module. |
 
 ## Mitigation Details
 
-Run these steps in order on each affected machine. Each script is safe to run when it has nothing to do, and its first line or its last line tells you the result. None of the steps affects running VMs or needs a maintenance window, except the restart that [Step 5](#step-5-check-whether-a-restart-is-needed) can ask for on a single-machine instance.
+Run these steps in order on each affected machine. Each script checks or changes only the machine it runs on, is safe to run when it has nothing to do, and prints a result line. None of the steps affects running VMs or needs a maintenance window, except the restart that [Step 5](#step-5-check-whether-a-restart-is-needed) can ask for on a single-machine instance.
 
 ### Step 1: Find the processes that hold the external copy's files
 
@@ -411,56 +422,61 @@ Run the Step 1 script again. This changes nothing. Then go to Step 4.
 
 ### Step 4: Run the cleanup script
 
-**Changes:** unloads, uninstalls, and deletes only copies in version-number folders. The inbox module and running VMs are not affected. Run this script only after Issue Validation listed an external copy.
+**Changes:** unloads, uninstalls, and deletes only copies in version-number folders. The inbox module and running VMs are not affected. When the inbox module is missing, the script removes nothing.
 
 ```powershell
 $moduleName = "AzStackHci.EnvironmentChecker"
-# Unload any previously loaded modules
-$loadedModule = Get-Module -Name $moduleName | Where-Object {$_.Path -like "*$($_.Version)*"}
-if ($loadedModule)
-{
-    Write-Host "Loaded module(s) found for $($loadedModule.Name):"
-    Write-Host ($loadedModule | Format-Table Name, Version, Path -AutoSize | Out-String)
-    Write-Host "Unloading"
-    $loadedModule | Remove-Module -Force
-}
-
-# Uninstall any modules installed from external
-$installedModule = Get-Module -Name $moduleName -ListAvailable | Where-Object {$_.Path -like "*$($_.Version)*"}
-if ($installedModule)
-{
-    Write-Host "Externally installed module(s) found for $($installedModule.Name):"
-    Write-Host ($installedModule | Format-Table Name, Version, Path -AutoSize | Out-String)
-    Write-Host "Uninstalling module(s)"
-    $installedModule | Uninstall-Module -Force -ErrorAction SilentlyContinue
-    foreach ($im in $installedModule)
-    {
-        Write-Host "Checking module still exists on disk..."
-        if (Test-Path $im.ModuleBase -ErrorAction SilentlyContinue) {
-            Write-Host "Removing old module files $($im.ModuleBase)"
-            Remove-Item -Path $im.ModuleBase -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable removeErrors
-            if ($removeErrors) {
-                Write-Host "Some files in $($im.ModuleBase) are still in use and were not removed: $($removeErrors[0].Exception.Message)"
-            }
-        }else {
-            Write-Host "Old module files not found at $($im.ModuleBase)"
-        }
-    }
-} else {
-    Write-Host "Nothing to uninstall"
-}
-
-# Check final module is our one.
-$FinalModule = Get-Module -Name $moduleName -ListAvailable
-if (-not ($FinalModule | Where-Object {$_.Path -notlike "*$($_.Version)*"})) {
+if (-not (Get-Module -Name $moduleName -ListAvailable | Where-Object {$_.Path -notlike "*$($_.Version)*"})) {
     Write-Output "INBOX_MODULE_MISSING"
-} elseif ($FinalModule | Where-Object {$_.Path -like "*$($_.Version)*"}) {
-    Write-Output "CLEANUP_EXTERNAL_REMAINS"
+    Write-Output "The inbox module is missing, so nothing was removed."
 } else {
-    Write-Output "CLEANUP_EXTERNAL_REMOVED"
+    # Unload any previously loaded modules
+    $loadedModule = Get-Module -Name $moduleName | Where-Object {$_.Path -like "*$($_.Version)*"}
+    if ($loadedModule)
+    {
+        Write-Host "Loaded module(s) found for $($loadedModule.Name):"
+        Write-Host ($loadedModule | Format-Table Name, Version, Path -AutoSize | Out-String)
+        Write-Host "Unloading"
+        $loadedModule | Remove-Module -Force
+    }
+
+    # Uninstall any modules installed from external
+    $installedModule = Get-Module -Name $moduleName -ListAvailable | Where-Object {$_.Path -like "*$($_.Version)*"}
+    if ($installedModule)
+    {
+        Write-Host "Externally installed module(s) found for $($installedModule.Name):"
+        Write-Host ($installedModule | Format-Table Name, Version, Path -AutoSize | Out-String)
+        Write-Host "Uninstalling module(s)"
+        $installedModule | Uninstall-Module -Force -ErrorAction SilentlyContinue
+        foreach ($im in $installedModule)
+        {
+            Write-Host "Checking module still exists on disk..."
+            if (Test-Path $im.ModuleBase -ErrorAction SilentlyContinue) {
+                Write-Host "Removing old module files $($im.ModuleBase)"
+                Remove-Item -Path $im.ModuleBase -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable removeErrors
+                if ($removeErrors) {
+                    Write-Host "Some files in $($im.ModuleBase) are still in use and were not removed: $($removeErrors[0].Exception.Message)"
+                }
+            }else {
+                Write-Host "Old module files not found at $($im.ModuleBase)"
+            }
+        }
+    } else {
+        Write-Host "Nothing to uninstall"
+    }
+
+    # Check final module is our one.
+    $FinalModule = Get-Module -Name $moduleName -ListAvailable
+    if (-not ($FinalModule | Where-Object {$_.Path -notlike "*$($_.Version)*"})) {
+        Write-Output "INBOX_MODULE_MISSING"
+    } elseif ($FinalModule | Where-Object {$_.Path -like "*$($_.Version)*"}) {
+        Write-Output "CLEANUP_EXTERNAL_REMAINS"
+    } else {
+        Write-Output "CLEANUP_EXTERNAL_REMOVED"
+    }
+    Write-Host "Final installed module:"
+    Write-Host ($FinalModule | Format-Table Name, Version, Path -AutoSize | Out-String)
 }
-Write-Host "Final installed module:"
-Write-Host ($FinalModule | Format-Table Name, Version, Path -AutoSize | Out-String)
 ```
 
 The result line appears just before the final module list:
@@ -469,7 +485,7 @@ The result line appears just before the final module list:
 | --- | --- | --- |
 | `CLEANUP_EXTERNAL_REMOVED` | Only the inbox module is listed, at `C:\Program Files\WindowsPowerShell\Modules\AzStackHci.EnvironmentChecker\AzStackHci.EnvironmentChecker.psd1`, with no version-number folder in its path. If the script reported files that are still in use, the copy no longer loads because its module manifest is gone. | Go to Step 5. |
 | `CLEANUP_EXTERNAL_REMAINS` | The external copy is still listed, so the operation stays blocked. This is rare: a process that Step 2 does not stop still holds the copy's module manifest. | Go to Step 5. |
-| `INBOX_MODULE_MISSING` | The inbox module is not listed. | [Contact Microsoft support](#when-to-contact-microsoft-support). Do not install a replacement. The retry script in [Retry the failed operation](#retry-the-failed-operation) does not resume anything on a machine without the inbox module. |
+| `INBOX_MODULE_MISSING` | The inbox module is not listed, so the script removed nothing. | [Contact Microsoft support](#when-to-contact-microsoft-support). Do not install a replacement. The later steps change nothing on this machine, and the retry script retries nothing. |
 
 To run the cleanup on every machine from one session, save the script above as `Remove-ExternalEnvChecker.ps1` and run:
 
@@ -488,6 +504,7 @@ $remaining = @(Get-Module -Name $moduleName -ListAvailable | Where-Object {$_.Pa
 if ($remaining.Count -gt 0) {
     Write-Output "RESTART_REQUIRED"
     $remaining | ForEach-Object { "Still listed: $($_.Path)" }
+    "Restart this machine to release the files, then run Steps 4, 5, and 6 again. On a cluster with more than one machine, pause and drain it first. On a single-machine instance, plan a maintenance window, because the restart stops all VMs."
 } else {
     Write-Output "NO_RESTART_NEEDED"
 }
@@ -496,105 +513,168 @@ if ($remaining.Count -gt 0) {
 | Result | Meaning | What to do |
 | --- | --- | --- |
 | `NO_RESTART_NEEDED` | The external copy no longer loads. | Go to Step 6. |
-| `RESTART_REQUIRED` | The external copy is still listed, and only a restart releases the files that hold it. | Restart this machine as described below, run Step 4 again, then go to Step 6. |
+| `RESTART_REQUIRED` | The external copy is still listed, and only a restart releases the files that hold it. Until then, Step 6 cannot delete the copy and the retry script retries nothing. | Restart this machine, then run Steps 4, 5, and 6 again. On a deployed cluster with more than one machine, first pause and drain it as described in [Suspend and resume Azure Local machines for planned maintenance](https://learn.microsoft.com/azure/azure-local/manage/suspend-resume-cluster-maintenance), and resume it afterward. On a single-machine instance, there is no other machine to drain to: plan a maintenance window, and shut down or save the VMs first. Before the cluster exists (during deployment), restart the machine normally. |
 
-How to restart this machine when the result is `RESTART_REQUIRED`:
-
-- On a deployed cluster with more than one machine, follow the pause and drain procedure in [Suspend and resume Azure Local machines for planned maintenance](https://learn.microsoft.com/azure/azure-local/manage/suspend-resume-cluster-maintenance), so workloads move to other machines before the restart, and resume the machine afterward.
-- On a single-machine instance, there is no other machine to drain to, so the pause and drain procedure does not apply. Plan a maintenance window, and shut down or save the VMs before the restart.
-- Before the cluster exists (during deployment), restart the machine normally.
-
-**Plan for:** a maintenance window on a single-machine instance.
+**Plan for:** a maintenance window if a single-machine instance needs the restart.
 
 > [!WARNING]
-> On a single-machine instance, this restart stops all running VMs.
+> On a single-machine instance, the restart stops all running VMs.
 
 ### Step 6: Delete leftover folders
 
-**Changes:** deletes only subfolders whose name is a version number. The inbox files are not in such a subfolder and are not touched.
+**Changes:** deletes only subfolders whose name is a version number. The inbox files are not in such a subfolder and are not touched. When the inbox module is missing, the script deletes nothing.
 
 ```powershell
-$root = Join-Path $env:ProgramFiles "WindowsPowerShell\Modules\AzStackHci.EnvironmentChecker"
-$leftover = @(Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -as [version] })
-$inUse = @()
-foreach ($folder in $leftover) {
-    Write-Host "Removing leftover folder $($folder.FullName)"
-    Remove-Item -LiteralPath $folder.FullName -Recurse -Force -ErrorAction SilentlyContinue
-    if (Test-Path -LiteralPath $folder.FullName) { $inUse += $folder.FullName }
-}
-if ($leftover.Count -eq 0) {
-    Write-Output "NO_LEFTOVER_FOLDERS"
-} elseif ($inUse.Count -gt 0) {
-    Write-Output "LEFTOVER_FOLDER_IN_USE"
-    $inUse | ForEach-Object { "Still in use, left in place: $_" }
+$moduleName = "AzStackHci.EnvironmentChecker"
+$root = Join-Path $env:ProgramFiles "WindowsPowerShell\Modules\$moduleName"
+if (-not (Get-Module -Name $moduleName -ListAvailable | Where-Object {$_.Path -notlike "*$($_.Version)*"})) {
+    Write-Output "INBOX_MODULE_MISSING"
+    Write-Output "The inbox module is missing, so nothing was deleted."
 } else {
-    Write-Output "LEFTOVER_FOLDERS_REMOVED"
+    $leftover = @(Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -as [version] })
+    $inUse = @()
+    foreach ($folder in $leftover) {
+        Write-Host "Removing leftover folder $($folder.FullName)"
+        Remove-Item -LiteralPath $folder.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $folder.FullName) { $inUse += $folder.FullName }
+    }
+    if ($leftover.Count -eq 0) {
+        Write-Output "NO_LEFTOVER_FOLDERS"
+    } elseif ($inUse.Count -gt 0) {
+        Write-Output "LEFTOVER_FOLDER_IN_USE"
+        $inUse | ForEach-Object { "Still in use, left in place: $_" }
+    } else {
+        Write-Output "LEFTOVER_FOLDERS_REMOVED"
+    }
 }
 ```
 
 | Result | Meaning | What to do |
 | --- | --- | --- |
 | `LEFTOVER_FOLDERS_REMOVED` or `NO_LEFTOVER_FOLDERS` | No version-number folder is left. | Go to [Verify the fix](#verify-the-fix). |
-| `LEFTOVER_FOLDER_IN_USE` | A process that Step 2 does not stop still holds files in the folder. The folder's module manifest is already gone, so it does not load and does not block the operation. | Leave the folder for now and go to [Verify the fix](#verify-the-fix). Run this step again after the machine's next planned restart, rather than restarting the machine for this alone. |
+| `LEFTOVER_FOLDER_IN_USE` | A process that Step 2 does not stop still holds files in the folder. If Step 5 printed `NO_RESTART_NEEDED`, the folder's module manifest is already gone, so it does not load and does not block the operation. | Leave the folder for now and go to [Verify the fix](#verify-the-fix). Run this step again after the machine's next planned restart, rather than restarting the machine for this alone. |
+| `INBOX_MODULE_MISSING` | The inbox module is not listed, so nothing was deleted. | [Contact Microsoft support](#when-to-contact-microsoft-support). |
 
 ## Verify the fix
 
-Run the all-machines check in [Issue Validation](#issue-validation) again. On every machine, `ExternalCopies` should be empty, and `AllAvailableModules` should show only `C:\Program Files\WindowsPowerShell\Modules\AzStackHci.EnvironmentChecker\AzStackHci.EnvironmentChecker.psd1`. `VersionFolders` should also be empty, except for a folder that you deliberately left in place under [Step 6](#step-6-delete-leftover-folders) until the next planned restart.
+Run this on one machine. It changes nothing. It checks every machine of the cluster and prints a result line. Before the cluster exists (during deployment), it checks only the machine it runs on, so run it on each machine. Paste or run the whole block at once.
+
+```powershell
+& {
+    $moduleName = "AzStackHci.EnvironmentChecker"
+    $checkMachine = {
+        param($Name)
+        $root = Join-Path $env:ProgramFiles "WindowsPowerShell\Modules\$Name"
+        $found = @(Get-Module -Name $Name -ListAvailable)
+        [pscustomobject]@{
+            ExternalCopies = @($found | Where-Object { $_.Path -like "*$($_.Version)*" } | ForEach-Object { $_.Path })
+            InboxModule    = @($found | Where-Object { $_.Path -notlike "*$($_.Version)*" } | ForEach-Object { $_.Path })
+            VersionFolders = @(Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -as [version] } | ForEach-Object { $_.FullName })
+        }
+    }
+    $clusterExists = $true
+    $nodes = @($env:COMPUTERNAME)
+    try { $nodes = @((Get-ClusterNode -ErrorAction Stop).Name) } catch { $clusterExists = $false }
+    $results = @(foreach ($node in $nodes) {
+        try {
+            if ($node -eq $env:COMPUTERNAME) { $state = & $checkMachine $moduleName }
+            else { $state = Invoke-Command -ComputerName $node -ScriptBlock $checkMachine -ArgumentList $moduleName -ErrorAction Stop }
+            [pscustomobject]@{
+                Machine        = $node
+                Clean          = ($state.ExternalCopies.Count -eq 0) -and ($state.InboxModule.Count -ge 1)
+                ExternalCopies = ($state.ExternalCopies -join '; ')
+                InboxModule    = ($state.InboxModule -join '; ')
+                VersionFolders = ($state.VersionFolders -join '; ')
+            }
+        } catch {
+            [pscustomobject]@{ Machine = $node; Clean = $false; ExternalCopies = "Could not be checked: $($_.Exception.Message)"; InboxModule = ''; VersionFolders = '' }
+        }
+    })
+    if (@($results | Where-Object { -not $_.Clean }).Count -gt 0) { Write-Output "NOT_ALL_MACHINES_CLEAN" }
+    elseif ($clusterExists) { Write-Output "ALL_MACHINES_CLEAN" }
+    else { Write-Output "THIS_MACHINE_CLEAN" }
+    $results | Format-List Machine, Clean, ExternalCopies, InboxModule, VersionFolders
+}
+```
+
+| Result | Meaning | What to do |
+| --- | --- | --- |
+| `ALL_MACHINES_CLEAN` | No machine has an external copy, and every machine has the inbox module at `C:\Program Files\WindowsPowerShell\Modules\AzStackHci.EnvironmentChecker\AzStackHci.EnvironmentChecker.psd1`. A `VersionFolders` entry is a folder you deliberately left in place under [Step 6](#step-6-delete-leftover-folders) until the next planned restart; it does not load. | Go to [Retry the failed operation](#retry-the-failed-operation). |
+| `THIS_MACHINE_CLEAN` | The cluster does not exist yet, and this machine is clean. | Run this on every other machine. When each one prints `THIS_MACHINE_CLEAN`, go to [Retry the failed operation](#retry-the-failed-operation). |
+| `NOT_ALL_MACHINES_CLEAN` | At least one machine still has an external copy, is missing the inbox module, or could not be checked. | Run Steps 1 to 6 on each machine where `Clean` is `False`. If a machine could not be checked, run this on that machine. |
 
 Do not use the system health check to confirm this fix. It can keep showing a previous result, and it runs the cleanup only on the machine where it runs.
 
-When every machine is clean, retry the operation as described in [Retry the failed operation](#retry-the-failed-operation).
-
 ## Retry the failed operation
 
-Retry only after [Verify the fix](#verify-the-fix) shows every machine clean. Run this script on one machine. It resumes a solution update that failed during installation. For any other operation, it prints how to retry it.
+Run this script on one machine. It first runs the same check as [Verify the fix](#verify-the-fix), and it retries nothing unless every machine is clean. It then resumes a solution update that failed during installation. For any other operation, it prints how to retry it. Paste or run the whole block at once.
 
-**Changes:** resumes the update only when this machine is clean and exactly one update is in the `InstallationFailed` state. The update continues from the step that failed. In every other case the script changes nothing and only lists the updates.
+**Changes:** resumes the update only when every machine is clean and exactly one update is in the `InstallationFailed` state. The update continues from the step that failed. In every other case the script changes nothing.
 
 **Plan for:** the rest of the update installation, including any machine restarts that the update performs, as when you first started it.
 
 ```powershell
-$moduleName = "AzStackHci.EnvironmentChecker"
-$modules = @(Get-Module -Name $moduleName -ListAvailable)
-$external = @($modules | Where-Object { $_.Path -like "*$($_.Version)*" })
-$inbox = @($modules | Where-Object { $_.Path -notlike "*$($_.Version)*" })
-$updates = $null
-$updateError = $null
-if ($inbox.Count -eq 0 -or $external.Count -gt 0) {
-    Write-Output "RETRY_BLOCKED"
-    Write-Output "This machine still has an external copy, or the inbox module is missing. Nothing was retried."
-} else {
-    try { $updates = @(Get-SolutionUpdate -ErrorAction Stop) }
-    catch { $updateError = $_.Exception.Message }
-    if ($null -eq $updates) {
-        Write-Output "UPDATE_SERVICE_NOT_AVAILABLE"
-        Write-Output "Could not read solution updates on this machine: $updateError"
-        Write-Output "If a deployment failed, resume it: open your Azure Local instance, go to Deployments, and select Resume deployment."
-    } else {
-        $failed = @($updates | Where-Object { $_.State -eq 'InstallationFailed' })
-        if ($failed.Count -eq 1) {
-            try {
-                $run = $failed[0] | Start-SolutionUpdate -ErrorAction Stop
-                Write-Output "SOLUTION_UPDATE_RESUMED"
-                Write-Output "Resumed $($failed[0].DisplayName). Update run: $run"
-            } catch {
-                $state = (Get-SolutionUpdate -Id $failed[0].ResourceId -ErrorAction SilentlyContinue).State
-                if ($state -eq 'Installing') {
-                    Write-Output "SOLUTION_UPDATE_RESUMED"
-                    Write-Output "$($failed[0].DisplayName) is already installing again."
-                } else {
-                    Write-Output "SOLUTION_UPDATE_NOT_RESUMED"
-                    Write-Output "Start-SolutionUpdate did not resume $($failed[0].DisplayName): $($_.Exception.Message)"
-                }
-            }
-        } elseif ($failed.Count -gt 1) {
-            Write-Output "SOLUTION_UPDATE_NOT_RESUMED"
-            Write-Output "More than one update is in the InstallationFailed state, so none was resumed."
-        } else {
-            Write-Output "NO_UPDATE_TO_RESUME"
-            Write-Output "No solution update failed during installation. Retry the operation that failed the same way you started it. An update that shows HealthCheckFailed failed in its readiness check: select Try again on it, or run the same Start-SolutionUpdate command again."
+& {
+    $moduleName = "AzStackHci.EnvironmentChecker"
+    $checkMachine = {
+        param($Name)
+        $found = @(Get-Module -Name $Name -ListAvailable)
+        [pscustomobject]@{
+            ExternalCopies = @($found | Where-Object { $_.Path -like "*$($_.Version)*" }).Count
+            InboxModule    = @($found | Where-Object { $_.Path -notlike "*$($_.Version)*" }).Count
         }
-        Get-SolutionUpdate -ErrorAction SilentlyContinue | Format-Table DisplayName, Version, State -AutoSize
+    }
+    $clusterExists = $true
+    $nodes = @($env:COMPUTERNAME)
+    try { $nodes = @((Get-ClusterNode -ErrorAction Stop).Name) } catch { $clusterExists = $false }
+    $notClean = @(foreach ($node in $nodes) {
+        try {
+            if ($node -eq $env:COMPUTERNAME) { $state = & $checkMachine $moduleName }
+            else { $state = Invoke-Command -ComputerName $node -ScriptBlock $checkMachine -ArgumentList $moduleName -ErrorAction Stop }
+            if ($state.ExternalCopies -gt 0 -or $state.InboxModule -eq 0) { "$node still has an external copy, or its inbox module is missing." }
+        } catch { "$node could not be checked: $($_.Exception.Message)" }
+    })
+    if ($notClean.Count -gt 0) {
+        Write-Output "RETRY_BLOCKED"
+        $notClean | ForEach-Object { "Nothing was retried. $_" }
+    } elseif (-not $clusterExists) {
+        Write-Output "CLUSTER_NOT_DEPLOYED"
+        Write-Output "The cluster does not exist yet, so only this machine was checked. When Verify the fix prints THIS_MACHINE_CLEAN on every machine, resume the deployment: open your Azure Local instance, go to Deployments, and select Resume deployment."
+    } else {
+        $updates = $null
+        $updateError = $null
+        try { $updates = @(Get-SolutionUpdate -ErrorAction Stop) }
+        catch { $updateError = $_.Exception.Message }
+        if ($null -eq $updates) {
+            Write-Output "UPDATE_SERVICE_NOT_AVAILABLE"
+            Write-Output "Could not read solution updates: $updateError"
+            Write-Output "If a deployment failed, resume it: open your Azure Local instance, go to Deployments, and select Resume deployment."
+        } else {
+            $failed = @($updates | Where-Object { $_.State -eq 'InstallationFailed' })
+            if ($failed.Count -eq 1) {
+                try {
+                    $run = $failed[0] | Start-SolutionUpdate -ErrorAction Stop
+                    Write-Output "SOLUTION_UPDATE_RESUMED"
+                    Write-Output "Resumed $($failed[0].DisplayName). Update run: $run"
+                } catch {
+                    $state = (Get-SolutionUpdate -Id $failed[0].ResourceId -ErrorAction SilentlyContinue).State
+                    if ($state -eq 'Installing') {
+                        Write-Output "SOLUTION_UPDATE_RESUMED"
+                        Write-Output "$($failed[0].DisplayName) is already installing again."
+                    } else {
+                        Write-Output "SOLUTION_UPDATE_NOT_RESUMED"
+                        Write-Output "Start-SolutionUpdate did not resume $($failed[0].DisplayName): $($_.Exception.Message)"
+                    }
+                }
+            } elseif ($failed.Count -gt 1) {
+                Write-Output "SOLUTION_UPDATE_NOT_RESUMED"
+                Write-Output "More than one update is in the InstallationFailed state, so none was resumed."
+            } else {
+                Write-Output "NO_UPDATE_TO_RESUME"
+                Write-Output "No solution update failed during installation. Retry the operation that failed the same way you started it. An update that shows HealthCheckFailed failed in its readiness check: select Try again on it, or run the same Start-SolutionUpdate command again."
+            }
+            Get-SolutionUpdate -ErrorAction SilentlyContinue | Format-Table DisplayName, Version, State -AutoSize
+        }
     }
 }
 ```
@@ -603,9 +683,10 @@ if ($inbox.Count -eq 0 -or $external.Count -gt 0) {
 | --- | --- | --- |
 | `SOLUTION_UPDATE_RESUMED` | The update is installing again. Its `State` in the list is `Installing`. | Follow its progress under **Updates** for your Azure Local instance. It should continue past the step that failed. |
 | `NO_UPDATE_TO_RESUME` | No solution update failed during installation, so nothing was resumed. The script prints how to retry other operations, including an update that failed in its readiness check (`HealthCheckFailed`). | Retry the operation that failed the same way you started it. If you started a readiness check with `Start-SolutionUpdate -PrepareOnly`, use the same command again. |
-| `UPDATE_SERVICE_NOT_AVAILABLE` | The solution update service did not answer. This is expected while the system is still being deployed. | For a deployment, see [Resume deployment](https://learn.microsoft.com/azure/azure-local/deploy/deploy-via-portal#resume-deployment). On a deployed system, see [Troubleshoot solution updates for Azure Local](https://learn.microsoft.com/azure/azure-local/update/update-troubleshooting-23h2). |
+| `CLUSTER_NOT_DEPLOYED` | The cluster does not exist yet, so the failed operation is a deployment. Only this machine was checked. | Confirm with [Verify the fix](#verify-the-fix) that every machine prints `THIS_MACHINE_CLEAN`, then resume the deployment as described in [Resume deployment](https://learn.microsoft.com/azure/azure-local/deploy/deploy-via-portal#resume-deployment). |
+| `UPDATE_SERVICE_NOT_AVAILABLE` | The cluster exists, but the solution update service did not answer. This can happen when a deployment failed after the cluster was created. | For a deployment, see [Resume deployment](https://learn.microsoft.com/azure/azure-local/deploy/deploy-via-portal#resume-deployment). On a deployed system, see [Troubleshoot solution updates for Azure Local](https://learn.microsoft.com/azure/azure-local/update/update-troubleshooting-23h2). |
 | `SOLUTION_UPDATE_NOT_RESUMED` | The update did not start again. The script prints the reason. | Retry the update the same way you started it. If it still does not start, [contact Microsoft support](#when-to-contact-microsoft-support). |
-| `RETRY_BLOCKED` | This machine is not clean yet. | Finish the steps in [Mitigation Details](#mitigation-details) on this machine first. |
+| `RETRY_BLOCKED` | A machine still has an external copy, is missing the inbox module, or could not be checked. The script names each one. | Run Steps 1 to 6 on each named machine, including the restart if its Step 5 printed `RESTART_REQUIRED`, and run this script again. If a machine could not be checked, run [Verify the fix](#verify-the-fix) on that machine. |
 
 ## Rollback
 
@@ -615,7 +696,7 @@ Normally there is nothing to roll back. A copy installed from the PowerShell Gal
 
 Open a support request if any of these is true:
 
-- The inbox module is missing from `AllAvailableModules`.
+- A check prints `INBOX_MODULE_MISSING`, or the inbox module is missing from `AllAvailableModules`.
 - Step 4 still prints `CLEANUP_EXTERNAL_REMAINS` after you restarted the machine and ran Step 4 again.
 - A leftover version-number folder still cannot be deleted after the machine has restarted.
 - The same error returns after the retry while Issue Validation shows no external copy.
@@ -623,7 +704,7 @@ Open a support request if any of these is true:
 
 Include this information:
 
-- The output of the all-machines Issue Validation command, before and after the steps you ran.
+- The output of the all-machines Issue Validation command before the steps you ran, and of [Verify the fix](#verify-the-fix) after them.
 - The full output of Step 1 and of the cleanup script from every machine.
 - The exact error text and the time it occurred, from the failed deployment or update step in the Azure portal.
 - The deployment log from `C:\CloudDeployment\Logs` that contains `Externally installed module(s) found for AzStackHci.EnvironmentChecker`.
