@@ -14,14 +14,6 @@
     "surface": "on-device",
     "catalog": "eligible"
   },
-  "validation": {
-    "fidelity_level": "L4",
-    "technical_grade": "A",
-    "reproduction_substrate": "hardware",
-    "automation_status": "proven",
-    "last_validated": "2026-11-26",
-    "spec_ref": "AzStackHci_EnvironmentChecker_ModuleShadowing"
-  },
   "handoffs": [
     {
       "id": "H1",
