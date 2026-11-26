@@ -31,6 +31,7 @@ This folder contains the TSG's related to Environment Validators.
 * [Known Issue: WinRM cannot process the configuration request](Known-Issue-WinRM-cannot-process-the-configuration-request.md)
 * [Known Issue: This module requires Az.Accounts version 5.3.0](Known-Issue-This-module-requires-Az-Accounts-version-5-3-0.md) - Type: troubleshoot; Products: Azure Local; Owner: Azure Local Environment Validator.
 * [Known Issue: Az.Accounts Is Reported as Missing During Deployment Validation](Known-Issue-AzAccounts-False-Missing-During-Deployment-Validation.md) - Type: troubleshoot; Products: Azure Local; Owner: Azure Local Environment Validator.
+* [Known Issue: Az.Accounts Is Reported as Missing During Deployment Validation](Known-Issue-AzAccounts-False-Missing-During-Deployment-Validation.md) - Type: troubleshoot; Products: Azure Local; Owner: Azure Local Environment Validator; Validation grade: A (L4); Automation: proven; Last validated: 2026-09-15.
 * [Known Issue: Pre-Update Health Check fails with AllResults property error](Known-Issue-AllResults-property-error-during-Pre-Update-Health-Check.md)
 * [Known Issue: Test-Cluster Administrative Privileges Failure During Deployment](Known-Issue-Test-Cluster-Administrative-Privileges-Failure.md)
 * [Known Issue: Test-WdacEnablement Fails with Null-Reference Error During Upgrade Validation](Known-Issue-Test-WdacEnablement-Null-Reference.md)
