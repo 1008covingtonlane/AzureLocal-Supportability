@@ -101,7 +101,7 @@ The system health check (`Invoke-SolutionUpdatePrecheck -SystemHealth`) runs the
 ## Where you can see this problem
 
 - **PowerShell on each machine:** the check in [Issue Validation](#issue-validation) lists the external copy.
-- **Azure portal:** the failed step shows the error from [Symptoms](#symptoms), under **Deployments** for a deployment, or in the failure details under **Updates** for a solution update. This follows the documented behavior for failed steps; it was not reproduced during validation of this article.
+- **Azure portal:** the failed step shows the error from [Symptoms](#symptoms), under **Deployments** for a deployment, or in the failure details under **Updates** for a solution update. This follows the documented behavior for failed steps.
 - **Log files on the machine:** the deployment log for the failed step in `C:\CloudDeployment\Logs`, for example `EnvironmentValidatorFull.<date>.log` during deployment, contains `Externally installed module(s) found for AzStackHci.EnvironmentChecker` and `Attempting to uninstall` (older builds log `Uninstalling`), followed by the result or the error.
 - **Windows event logs:** the error does not appear in the Windows event logs.
 - **Cluster log:** the error does not appear in the cluster log (`Get-ClusterLog`), because no cluster resource changes state.
@@ -176,7 +176,7 @@ How to read the result for each machine. The all-machines check prints the same 
 | Result | Meaning | Next step |
 | --- | --- | --- |
 | `EXTERNAL_COPY_FOUND` | An external copy is present. | Follow Steps 1 to 7 in [Mitigation Details](#mitigation-details). |
-| `LEFTOVER_FOLDER_ONLY` | A leftover folder from a partly removed copy. It no longer loads. | Follow Steps 1 to 7. Step 5 has nothing to uninstall, and Step 7 deletes the folder. If Step 7 already told you to leave it until the next planned restart, no further action is needed now. |
+| `LEFTOVER_FOLDER_ONLY` | A leftover folder from a partly removed copy. It no longer loads. | Go to [Step 7](#step-7-delete-leftover-folders). If it tells you to leave the folder until the next planned restart, no further action is needed now. |
 | `NOT_AFFECTED` | This machine is not affected. | None. |
 | `INBOX_MODULE_MISSING` | The inbox module is missing. | Stop and [contact Microsoft support](#when-to-contact-microsoft-support). Do not install a replacement. The cleanup scripts in Steps 5 and 7 remove nothing on a machine without the inbox module, and the retry script retries nothing. |
 | `Not checked from here` | All-machines check only: PowerShell remoting to that machine failed, so it was not checked. This does not mean that it is affected. `Note` shows the reason. | Run the single-machine check on that machine. |
@@ -189,7 +189,7 @@ Run these steps in order on each affected machine, in one PowerShell window: Ste
 
 This step changes nothing. It asks Windows Restart Manager which processes hold files in the external copy's version-number folders, lists each one with its owner, sign-in session, start time, Windows service, and command line, and says in `NextStep` what to do about it. `Get-Process` does not show these files, because PowerShell loads the module's .NET files in a way that it does not list. Remote PowerShell sessions appear as `wsmprovhost`.
 
-The script marks a process `Step 2 stops it.` only if it is a PowerShell process (`powershell`, `pwsh`, or `wsmprovhost`) that a person started: it does not run as SYSTEM, LocalService, NetworkService, or an account that runs a Windows service, does not run or belong to a Windows service, and is in a signed-in user's session. The only `wsmprovhost` processes that it marks are remote sessions that run under your account. It saves those processes, by process ID and start time, for Step 2.
+The script marks a process `Step 2 stops it.` only if it is a PowerShell window (`powershell` or `pwsh`) that a person started: it does not run as SYSTEM, LocalService, NetworkService, or an account that runs a Windows service, does not run or belong to a Windows service, and is in a signed-in user's session. It never marks a remote session (`wsmprovhost`), because Azure Local's own operations also run in remote sessions, and the two look the same. It saves the marked processes, by process ID and start time, for Step 2.
 
 ```powershell
 . {
@@ -267,7 +267,6 @@ public static class EnvCheckerFileHolders {
         $serviceSids = @('S-1-5-18', 'S-1-5-19', 'S-1-5-20') + @($services | ForEach-Object {
             try { ([System.Security.Principal.NTAccount]($_.StartName -replace '^\.\\', "$env:COMPUTERNAME\")).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { }
         })
-        $mySid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
         foreach ($id in $holderIds) {
             $process = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $id" -ErrorAction SilentlyContinue
             if (-not $process) { continue }
@@ -279,12 +278,12 @@ public static class EnvCheckerFileHolders {
             $hostsService = $servicePids -contains $id
             $serviceParent = ($servicePids -contains $process.ParentProcessId) -or ($parent.Name -eq 'services.exe')
             $userAccount = $sid -and ($serviceSids -notcontains $sid)
-            if ($name -eq 'wsmprovhost') { $canStop = $userAccount -and -not $hostsService -and ($sid -eq $mySid) }
-            elseif ('powershell', 'pwsh' -contains $name) { $canStop = $userAccount -and -not $hostsService -and -not $serviceParent -and ($process.SessionId -ne 0) }
+            if ('powershell', 'pwsh' -contains $name) { $canStop = $userAccount -and -not $hostsService -and -not $serviceParent -and ($process.SessionId -ne 0) }
             else { $canStop = $false }
             if ($id -eq $PID) { $canStop = $false; $next = 'This PowerShell window holds the files. Close it, open a new window, and start again at Step 1.' }
             elseif ($canStop) { $next = 'Step 2 stops it.' }
-            elseif (-not $userAccount -or $hostsService -or ($serviceParent -and $name -ne 'wsmprovhost')) { $next = 'It runs as or for a Windows service. Leave it running; Step 5 removes what it can, and Step 6 says whether a restart is needed.' }
+            elseif ($name -eq 'wsmprovhost' -and $userAccount -and -not $hostsService) { $next = "Remote PowerShell session of $ownerName. Ask them to end it on the computer that opened it. If no one can, leave it running; Step 5 removes what it can." }
+            elseif (-not $userAccount -or $hostsService -or $serviceParent) { $next = 'It runs as or for a Windows service. Leave it running; Step 5 removes what it can, and Step 6 says whether a restart is needed.' }
             elseif ($process.SessionId -eq 0) { $next = "Ask $ownerName to close it or end their remote session. Never sign out session 0." }
             else { $next = "Ask $ownerName to close it. If that is not possible, sign the user out with: logoff $($process.SessionId)" }
             [pscustomobject]@{
@@ -335,9 +334,9 @@ public static class EnvCheckerFileHolders {
 
 ### Step 2: Stop the PowerShell sessions that hold the files
 
-Run this in the same window, after you have read the Step 1 list. It stops a process only if Step 1 marked it `Step 2 stops it.`, it is the same process (same process ID and start time), and it still holds the files. On a deployed system it first reads the solution update state and stops nothing while an update is installing, preparing, or running health checks. It cannot check deployment, add node, or repair node operations, so confirm in the Azure portal that none is running, especially if you are signed in with the deployment account. If the list includes another person's session, ask them before you run this step.
+Run this in the same window, after you have read the Step 1 list. It stops a process only if Step 1 marked it `Step 2 stops it.`, it is the same process (same process ID and start time), and it still holds the files. On a deployed system it first reads the solution update state and stops nothing while an update or a health check is running. It cannot check deployment, add node, or repair node operations, so confirm in the Azure portal that none is running. If the list includes another person's session, ask them before you run this step.
 
-**Changes:** stops the PowerShell processes described above. Work that is not saved in them is lost, and stopping a `wsmprovhost` process ends your remote PowerShell session that it hosts. It does not stop the window you run it from, any service, or any other process. Running VMs are not affected.
+**Changes:** stops the PowerShell windows described above. Work that is not saved in them is lost. It does not stop the window you run it from, any service, or any other process. Running VMs are not affected.
 
 ```powershell
 & {
@@ -350,7 +349,11 @@ Run this in the same window, after you have read the Step 1 list. It stops a pro
     try { $null = Get-ClusterNode -ErrorAction Stop } catch { $clusterExists = $false }
     if ($clusterExists) {
         Import-Module -Name Microsoft.AzureStack.Lcm.PowerShell -ErrorAction SilentlyContinue 4>$null
-        try { $active = @(Get-SolutionUpdate -ErrorAction Stop 4>$null | Where-Object { 'Installing', 'Preparing', 'HealthChecking' -contains $_.State }) }
+        try {
+            $active = @(Get-SolutionUpdate -ErrorAction Stop 4>$null | Where-Object { ('Installing', 'Preparing', 'HealthChecking', 'Downloading', 'ScanInProgress' -contains $_.State) -or ($_.HealthState -eq 'InProgress') })
+            $environment = Get-SolutionUpdateEnvironment -ErrorAction Stop 4>$null
+            if (("$($environment.State)" -like '*InProgress*') -or ("$($environment.HealthState)" -eq 'InProgress')) { $active += [pscustomobject]@{ DisplayName = 'The system health check'; State = 'InProgress' } }
+        }
         catch {
             Write-Output 'UPDATE_STATE_UNKNOWN'
             Write-Output "Nothing was stopped. Could not read the solution update state: $($_.Exception.Message)"
@@ -389,8 +392,8 @@ Run this in the same window, after you have read the Step 1 list. It stops a pro
 | --- | --- | --- |
 | `SESSIONS_STOPPED` | The script stopped the sessions it lists, and lists each process that it left running. | Go to Step 3. |
 | `NO_SESSIONS_STOPPED` | No reviewed session still held the files. | Go to Step 3. |
-| `UPDATE_IN_PROGRESS` | A solution update is installing, preparing, or running health checks, so nothing was stopped. Its PowerShell sessions can hold the files. | Wait until the update stops, then start again at Step 1. |
-| `UPDATE_STATE_UNKNOWN` | The update state could not be read, so nothing was stopped. | Run Step 2 again in a minute. If it keeps printing this and no operation is running, close the sessions that Step 1 marked `Step 2 stops it.` yourself, with their owners' agreement, then go to Step 4. |
+| `UPDATE_IN_PROGRESS` | A solution update or a health check is running, so nothing was stopped. Its PowerShell sessions can hold the files. | Wait until the update stops, then start again at Step 1. |
+| `UPDATE_STATE_UNKNOWN` | The update state could not be read, so nothing was stopped. | Run Step 2 again in a minute. If it keeps printing this, go to Step 5. |
 | `STEP_1_NOT_RUN` or `LOCK_CHECK_UNAVAILABLE` | Nothing was stopped. | Run Step 1 in this window, then this step again. If Step 1 prints `LOCK_CHECK_UNAVAILABLE`, follow its row. |
 
 ### Step 3: Close the other programs that hold the files
@@ -588,7 +591,7 @@ Do not use the system health check to confirm this fix. It can keep showing a pr
 
 Run this script on one machine, after [Verify the fix](#verify-the-fix) printed `ALL_MACHINES_CLEAN`, or printed `THIS_MACHINE_CLEAN` on every machine. It first checks this machine and every other machine that it can reach, the same way as Verify the fix, and it retries nothing if one of them is not clean. It then resumes a solution update whose installation failed with the error in this article. For any other operation, it prints how to retry it. Paste or run the whole block at once.
 
-**Changes:** resumes the update only when this machine and every machine that the script can reach are clean, no update is installing, preparing, or running health checks, and exactly one update is in the `InstallationFailed` state with the error from [Symptoms](#symptoms) in its last run. The update continues from the step that failed. In every other case the script changes nothing.
+**Changes:** resumes the update only when this machine and every machine that the script can reach are clean, no update is downloading, preparing, installing, or running health checks, and exactly one update is in the `InstallationFailed` state with the error from [Symptoms](#symptoms) in its last run. The update continues from the step that failed. In every other case the script changes nothing.
 
 **Plan for:** the rest of the update installation, including any machine restarts that the update performs, as when you first started it.
 
@@ -656,7 +659,7 @@ Run this script on one machine, after [Verify the fix](#verify-the-fix) printed 
             Write-Output "If a deployment failed, resume it: open your Azure Local instance, go to Deployments, and select Resume deployment."
             $notCheckedLines
         } else {
-            $active = @($updates | Where-Object { 'Installing', 'Preparing', 'HealthChecking' -contains $_.State })
+            $active = @($updates | Where-Object { ('Installing', 'Preparing', 'HealthChecking', 'Downloading', 'ScanInProgress' -contains $_.State) -or ($_.HealthState -eq 'InProgress') })
             $failed = @($updates | Where-Object { $_.State -eq 'InstallationFailed' })
             $related = $false
             if ($failed.Count -eq 1) {
@@ -712,7 +715,7 @@ Run this script on one machine, after [Verify the fix](#verify-the-fix) printed 
 | Result | Meaning | What to do |
 | --- | --- | --- |
 | `SOLUTION_UPDATE_RESUMED` | The update is installing again. Its `State` in the list is `Installing`. If you run this script on several machines at the same time, one of them resumes the update and the others report that it is already installing. | Follow its progress under **Updates** for your Azure Local instance. It should continue past the step that failed. |
-| `ALREADY_IN_PROGRESS` | An update is already installing, preparing, or running health checks, so nothing was resumed. | Follow its progress under **Updates** for your Azure Local instance. |
+| `ALREADY_IN_PROGRESS` | An update is already downloading, preparing, installing, or running health checks, so nothing was resumed. | Follow its progress under **Updates** for your Azure Local instance. |
 | `UPDATE_FAILED_FOR_OTHER_REASON` | The failed update's last run does not show the error from [Symptoms](#symptoms), or its error could not be read, so the script did not resume it. | Check the error under **Updates**. If it is the error from [Symptoms](#symptoms), select **Try again**. Otherwise, see [Troubleshoot solution updates for Azure Local](https://learn.microsoft.com/azure/azure-local/update/update-troubleshooting-23h2). |
 | `WINDOWS_POWERSHELL_REQUIRED` | The script ran in PowerShell 7 and did nothing. | Run it in Windows PowerShell 5.1. |
 | `NO_UPDATE_TO_RESUME` | No solution update failed during installation, so nothing was resumed. The script prints how to retry other operations, including an update that failed in its readiness check (`HealthCheckFailed`). | Retry the operation that failed the same way you started it. If you started a readiness check with `Start-SolutionUpdate -PrepareOnly`, use the same command again. |
