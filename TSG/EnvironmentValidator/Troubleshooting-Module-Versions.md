@@ -56,7 +56,7 @@
 | Is it a network, hardware, or OEM problem? | No. The older error mentions `ValidateConnectivity`, but no network, firmware, or driver change is needed. |
 | Who should act | An administrator with local administrator rights on every machine. |
 | Time to fix | About 10 minutes, plus the time to retry the operation. |
-| Impact | The fix removes only the extra copy and, after you review the list, stops only the PowerShell sessions that hold its files. Running VMs are not affected. No restart or maintenance window is needed, except in the rare case described in [Step 5](#step-5-restart-the-machine-if-the-copy-is-still-listed). On a single-machine instance, that restart stops all VMs. |
+| Impact | The fix removes only the extra copy and, after you review the list, stops only the PowerShell sessions that hold its files. Running VMs are not affected. No restart or maintenance window is needed, except in the rare case described in [Step 5](#step-5-check-whether-a-restart-is-needed). On a single-machine instance, that restart stops all VMs. |
 | First step | Run the check in [Issue Validation](#issue-validation). |
 
 ## Overview
@@ -162,7 +162,7 @@ How to read the output for each machine:
 
 ## Mitigation Details
 
-Run these steps on each affected machine. None of them affects running VMs or needs a maintenance window, except the restart in [Step 5](#step-5-restart-the-machine-if-the-copy-is-still-listed) on a single-machine instance.
+Run these steps in order on each affected machine. Each script is safe to run when it has nothing to do, and its first line or its last line tells you the result. None of the steps affects running VMs or needs a maintenance window, except the restart that [Step 5](#step-5-check-whether-a-restart-is-needed) can ask for on a single-machine instance.
 
 ### Step 1: Find the processes that hold the external copy's files
 
@@ -251,7 +251,7 @@ public static class EnvCheckerFileHolders {
             Owner       = if ($owner.User) { "$($owner.Domain)\$($owner.User)" } else { 'unknown' }
             StartTime   = $process.CreationDate
             CanStop     = $isSession -and ($id -ne $PID)
-            NextStep    = if ($id -eq $PID) { 'This PowerShell window holds the files. Close it, open a new window, and start again at Step 1.' } elseif ($isSession) { 'Step 2 stops it.' } else { 'Step 2 does not stop it. Continue with Step 4.' }
+            NextStep    = if ($id -eq $PID) { 'This PowerShell window holds the files. Close it, open a new window, and start again at Step 1.' } elseif ($isSession) { 'Step 2 stops it.' } else { 'Step 2 does not stop it.' }
             CommandLine = $process.CommandLine
         }
     })
@@ -278,15 +278,13 @@ The first line of the output is the result:
 
 | Result | Meaning | Next step |
 | --- | --- | --- |
-| `LOCKING_SESSIONS_FOUND` | The listed processes hold files from the external copy. `NextStep` says which ones Step 2 stops. | Read the list, then go to Step 2. |
-| `NO_LOCKING_SESSIONS` | No process holds the files. | Go to Step 4. |
-| `LOCK_CHECK_UNAVAILABLE` | Windows did not allow the Restart Manager check to run in this PowerShell session, so the script lists every PowerShell process instead. Step 2 cannot stop sessions in this case. | Close the PowerShell windows and remote sessions that you or your team opened to run the Environment Checker, then go to Step 4. |
-
-If a listed session belongs to an Azure Local operation that is still running, stop here and wait for that operation to finish, as described in [Before you start](#before-you-start).
+| `LOCKING_SESSIONS_FOUND` | The listed processes hold files from the external copy. `NextStep` says which ones Step 2 stops. Check each `Owner` and `CommandLine` before you continue. | Go to Step 2. |
+| `NO_LOCKING_SESSIONS` | No process holds the files. | Go to Step 2. It has nothing to stop. |
+| `LOCK_CHECK_UNAVAILABLE` | Windows did not allow the Restart Manager check to run in this PowerShell session, so the script lists every PowerShell process instead, and Step 2 stops nothing. | Close the PowerShell windows and remote sessions that you or your team opened to run the Environment Checker, then go to Step 2. |
 
 ### Step 2: Stop the PowerShell sessions that hold the files
 
-Run this only when Step 1 printed `LOCKING_SESSIONS_FOUND`, and only after you have read its list. The script runs the same check as Step 1 and stops only the processes that the check finds at that moment and that Step 1 marks `Step 2 stops it.` Paste or run the whole block at once.
+Run this after you have read the Step 1 list. The script runs the same check as Step 1 and stops only the processes that the check finds at that moment and that Step 1 marks `Step 2 stops it.` When no PowerShell session holds the files, it stops nothing. Paste or run the whole block at once.
 
 **Changes:** stops each process that holds the external copy's files, is named `powershell`, `pwsh`, or `wsmprovhost`, and does not run a Windows service. Work that is not saved in those sessions is lost, and stopping a `wsmprovhost` process ends the remote PowerShell sessions that it hosts. It does not stop the PowerShell window that you run it from, any service, or any other process. Running VMs are not affected.
 
@@ -373,7 +371,7 @@ public static class EnvCheckerFileHolders {
             Owner       = if ($owner.User) { "$($owner.Domain)\$($owner.User)" } else { 'unknown' }
             StartTime   = $process.CreationDate
             CanStop     = $isSession -and ($id -ne $PID)
-            NextStep    = if ($id -eq $PID) { 'This PowerShell window holds the files. Close it, open a new window, and start again at Step 1.' } elseif ($isSession) { 'Step 2 stops it.' } else { 'Step 2 does not stop it. Continue with Step 4.' }
+            NextStep    = if ($id -eq $PID) { 'This PowerShell window holds the files. Close it, open a new window, and start again at Step 1.' } elseif ($isSession) { 'Step 2 stops it.' } else { 'Step 2 does not stop it.' }
             CommandLine = $process.CommandLine
         }
     })
@@ -401,14 +399,15 @@ public static class EnvCheckerFileHolders {
 | --- | --- | --- |
 | `SESSIONS_STOPPED` | The script stopped the PowerShell sessions it lists. | Go to Step 3. |
 | `NO_SESSIONS_STOPPED` | No PowerShell session held the files when the script ran, or the ones it found had already ended. | Go to Step 3. |
-| `LOCK_CHECK_UNAVAILABLE` | The check could not run, so nothing was stopped. | Go to Step 4. |
+| `LOCK_CHECK_UNAVAILABLE` | The check could not run, so nothing was stopped. | Go to Step 3. |
 
 ### Step 3: Confirm that the files are released
 
-Run the Step 1 script again. This changes nothing.
+Run the Step 1 script again. This changes nothing. Then go to Step 4.
 
-- **`NO_LOCKING_SESSIONS`:** the files are released. Go to Step 4.
-- **`LOCKING_SESSIONS_FOUND`:** a process still holds files. If it is a PowerShell session marked `Step 2 stops it.`, it started after Step 2 ran; run Step 2 again. If every listed process is marked `Step 2 does not stop it.`, go to Step 4. The cleanup removes everything it can, and Step 5 covers the rare case where that is not enough.
+- **`NO_LOCKING_SESSIONS`:** the files are released.
+- **`LOCKING_SESSIONS_FOUND`:** a process still holds files. Either it is not a PowerShell session, or it is a session that started after Step 2 ran. The cleanup in Step 4 removes everything it can, and Step 5 tells you whether a restart is needed.
+- **`LOCK_CHECK_UNAVAILABLE`:** the check still cannot run in this PowerShell session.
 
 ### Step 4: Run the cleanup script
 
@@ -468,9 +467,9 @@ The result line appears just before the final module list:
 
 | Result | Meaning | Next step |
 | --- | --- | --- |
-| `CLEANUP_EXTERNAL_REMOVED` | Only the inbox module is listed, at `C:\Program Files\WindowsPowerShell\Modules\AzStackHci.EnvironmentChecker\AzStackHci.EnvironmentChecker.psd1`, with no version-number folder in its path. If the script reported files that are still in use, the copy no longer loads because its module manifest is gone. | Go to Step 6. |
+| `CLEANUP_EXTERNAL_REMOVED` | Only the inbox module is listed, at `C:\Program Files\WindowsPowerShell\Modules\AzStackHci.EnvironmentChecker\AzStackHci.EnvironmentChecker.psd1`, with no version-number folder in its path. If the script reported files that are still in use, the copy no longer loads because its module manifest is gone. | Go to Step 5. |
 | `CLEANUP_EXTERNAL_REMAINS` | The external copy is still listed, so the operation stays blocked. This is rare: a process that Step 2 does not stop still holds the copy's module manifest. | Go to Step 5. |
-| `INBOX_MODULE_MISSING` | The inbox module is not listed. | Stop and [contact Microsoft support](#when-to-contact-microsoft-support). Do not install a replacement. |
+| `INBOX_MODULE_MISSING` | The inbox module is not listed. | [Contact Microsoft support](#when-to-contact-microsoft-support). Do not install a replacement. The retry script in [Retry the failed operation](#retry-the-failed-operation) does not resume anything on a machine without the inbox module. |
 
 To run the cleanup on every machine from one session, save the script above as `Remove-ExternalEnvChecker.ps1` and run:
 
@@ -479,13 +478,27 @@ $nodes = (Get-ClusterNode).Name   # Before the cluster exists, set $nodes to the
 Invoke-Command -ComputerName $nodes -FilePath .\Remove-ExternalEnvChecker.ps1
 ```
 
-### Step 5: Restart the machine if the copy is still listed
+### Step 5: Check whether a restart is needed
 
-Do this step only when Step 4 printed `CLEANUP_EXTERNAL_REMAINS`. A restart releases every file, including files held by processes that Step 2 does not stop.
+This step changes nothing. A restart is needed only in the rare case where Step 4 printed `CLEANUP_EXTERNAL_REMAINS`, because a process that Step 2 does not stop still holds the copy's module manifest. The script checks for that case again.
 
-**Automation boundary.** A person must plan and start this restart. The scripts in this article never restart a machine.
+```powershell
+$moduleName = "AzStackHci.EnvironmentChecker"
+$remaining = @(Get-Module -Name $moduleName -ListAvailable | Where-Object {$_.Path -like "*$($_.Version)*"})
+if ($remaining.Count -gt 0) {
+    Write-Output "RESTART_REQUIRED"
+    $remaining | ForEach-Object { "Still listed: $($_.Path)" }
+} else {
+    Write-Output "NO_RESTART_NEEDED"
+}
+```
 
-**Changes:** restarts this machine. On a deployed cluster with more than one machine, drain it first so its VMs move to other machines:
+| Result | Meaning | What to do |
+| --- | --- | --- |
+| `NO_RESTART_NEEDED` | The external copy no longer loads. | Go to Step 6. |
+| `RESTART_REQUIRED` | The external copy is still listed, and only a restart releases the files that hold it. | Restart this machine as described below, run Step 4 again, then go to Step 6. |
+
+How to restart this machine when the result is `RESTART_REQUIRED`:
 
 - On a deployed cluster with more than one machine, follow the pause and drain procedure in [Suspend and resume Azure Local machines for planned maintenance](https://learn.microsoft.com/azure/azure-local/manage/suspend-resume-cluster-maintenance), so workloads move to other machines before the restart, and resume the machine afterward.
 - On a single-machine instance, there is no other machine to drain to, so the pause and drain procedure does not apply. Plan a maintenance window, and shut down or save the VMs before the restart.
@@ -496,11 +509,9 @@ Do this step only when Step 4 printed `CLEANUP_EXTERNAL_REMAINS`. A restart rele
 > [!WARNING]
 > On a single-machine instance, this restart stops all running VMs.
 
-After the restart, run Step 4 again, then Step 6.
-
 ### Step 6: Delete leftover folders
 
-**Changes:** deletes only subfolders whose name is a version number. The inbox files are not in such a subfolder and are not touched. Run this after Step 4 printed `CLEANUP_EXTERNAL_REMOVED`.
+**Changes:** deletes only subfolders whose name is a version number. The inbox files are not in such a subfolder and are not touched.
 
 ```powershell
 $root = Join-Path $env:ProgramFiles "WindowsPowerShell\Modules\AzStackHci.EnvironmentChecker"
@@ -521,7 +532,7 @@ if ($leftover.Count -eq 0) {
 }
 ```
 
-| Result | Meaning | Next step |
+| Result | Meaning | What to do |
 | --- | --- | --- |
 | `LEFTOVER_FOLDERS_REMOVED` or `NO_LEFTOVER_FOLDERS` | No version-number folder is left. | Go to [Verify the fix](#verify-the-fix). |
 | `LEFTOVER_FOLDER_IN_USE` | A process that Step 2 does not stop still holds files in the folder. The folder's module manifest is already gone, so it does not load and does not block the operation. | Leave the folder for now and go to [Verify the fix](#verify-the-fix). Run this step again after the machine's next planned restart, rather than restarting the machine for this alone. |
@@ -536,67 +547,65 @@ When every machine is clean, retry the operation as described in [Retry the fail
 
 ## Retry the failed operation
 
-Retry only after [Verify the fix](#verify-the-fix) shows every machine clean.
+Retry only after [Verify the fix](#verify-the-fix) shows every machine clean. Run this script on one machine of the deployed system.
 
-### Resume a solution update
+**Automation boundary.** The script resumes only a solution update that failed during installation. A person resumes a deployment, and a person retries an upgrade, add node, or repair node operation, as the table below describes. The script never restarts a machine.
 
-Run this on one machine of the deployed system. It resumes a solution update that failed during installation, which is the PowerShell equivalent of **Try again** in the Azure portal.
-
-**Changes:** resumes the update only when exactly one update is in the `InstallationFailed` state. The update continues from the step that failed. In every other case the script changes nothing and only lists the updates.
+**Changes:** resumes the update only when this machine is clean and exactly one update is in the `InstallationFailed` state. The update continues from the step that failed. In every other case the script changes nothing and only lists the updates.
 
 **Plan for:** the rest of the update installation, including any machine restarts that the update performs, as when you first started it.
 
 ```powershell
+$moduleName = "AzStackHci.EnvironmentChecker"
+$modules = @(Get-Module -Name $moduleName -ListAvailable)
+$external = @($modules | Where-Object { $_.Path -like "*$($_.Version)*" })
+$inbox = @($modules | Where-Object { $_.Path -notlike "*$($_.Version)*" })
 $updates = $null
 $updateError = $null
-try { $updates = @(Get-SolutionUpdate -ErrorAction Stop) }
-catch { $updateError = $_.Exception.Message }
-if ($null -eq $updates) {
-    Write-Output "UPDATE_SERVICE_NOT_AVAILABLE"
-    Write-Output "Could not read solution updates on this machine: $updateError"
+if ($inbox.Count -eq 0 -or $external.Count -gt 0) {
+    Write-Output "RETRY_BLOCKED"
+    Write-Output "This machine still has an external copy, or the inbox module is missing. Nothing was retried."
 } else {
-    $failed = @($updates | Where-Object { $_.State -eq 'InstallationFailed' })
-    if ($failed.Count -eq 1) {
-        try {
-            $run = $failed[0] | Start-SolutionUpdate -ErrorAction Stop
-            Write-Output "SOLUTION_UPDATE_RESUMED"
-            Write-Output "Resumed $($failed[0].DisplayName). Update run: $run"
-        } catch {
-            $state = (Get-SolutionUpdate -Id $failed[0].ResourceId -ErrorAction SilentlyContinue).State
-            if ($state -eq 'Installing') {
-                Write-Output "SOLUTION_UPDATE_RESUMED"
-                Write-Output "$($failed[0].DisplayName) is already installing again."
-            } else {
-                Write-Output "SOLUTION_UPDATE_NOT_RESUMED"
-                Write-Output "Start-SolutionUpdate did not resume $($failed[0].DisplayName): $($_.Exception.Message)"
-            }
-        }
-    } elseif ($failed.Count -gt 1) {
-        Write-Output "SOLUTION_UPDATE_NOT_RESUMED"
-        Write-Output "More than one update is in the InstallationFailed state. Resume the one you started by selecting Try again on it in the Azure portal."
+    try { $updates = @(Get-SolutionUpdate -ErrorAction Stop) }
+    catch { $updateError = $_.Exception.Message }
+    if ($null -eq $updates) {
+        Write-Output "UPDATE_SERVICE_NOT_AVAILABLE"
+        Write-Output "Could not read solution updates on this machine: $updateError"
     } else {
-        Write-Output "NO_UPDATE_TO_RESUME"
+        $failed = @($updates | Where-Object { $_.State -eq 'InstallationFailed' })
+        if ($failed.Count -eq 1) {
+            try {
+                $run = $failed[0] | Start-SolutionUpdate -ErrorAction Stop
+                Write-Output "SOLUTION_UPDATE_RESUMED"
+                Write-Output "Resumed $($failed[0].DisplayName). Update run: $run"
+            } catch {
+                $state = (Get-SolutionUpdate -Id $failed[0].ResourceId -ErrorAction SilentlyContinue).State
+                if ($state -eq 'Installing') {
+                    Write-Output "SOLUTION_UPDATE_RESUMED"
+                    Write-Output "$($failed[0].DisplayName) is already installing again."
+                } else {
+                    Write-Output "SOLUTION_UPDATE_NOT_RESUMED"
+                    Write-Output "Start-SolutionUpdate did not resume $($failed[0].DisplayName): $($_.Exception.Message)"
+                }
+            }
+        } elseif ($failed.Count -gt 1) {
+            Write-Output "SOLUTION_UPDATE_NOT_RESUMED"
+            Write-Output "More than one update is in the InstallationFailed state, so none was resumed."
+        } else {
+            Write-Output "NO_UPDATE_TO_RESUME"
+        }
+        Get-SolutionUpdate -ErrorAction SilentlyContinue | Format-Table DisplayName, Version, State -AutoSize
     }
-    Get-SolutionUpdate -ErrorAction SilentlyContinue | Format-Table DisplayName, Version, State -AutoSize
 }
 ```
 
-| Result | Meaning | Next step |
+| Result | Meaning | What to do |
 | --- | --- | --- |
-| `SOLUTION_UPDATE_RESUMED` | The update is installing again. Its `State` in the list is `Installing`. | Follow its progress in the Azure portal, under **Updates**. It should continue past the step that failed. |
-| `NO_UPDATE_TO_RESUME` | No solution update failed during installation. | If an update in the list shows `HealthCheckFailed`, it failed in its readiness check: retry it the same way you started it, with **Try again** in the Azure portal or with the same `Start-SolutionUpdate` command (including `-PrepareOnly` if you used it). If an upgrade, add node, or repair node operation failed, retry it the same way you started it. |
-| `UPDATE_SERVICE_NOT_AVAILABLE` | The solution update service did not answer. This is expected while the system is still being deployed. | If a deployment failed, go to [Resume a deployment](#resume-a-deployment). On a deployed system, see [Troubleshoot solution updates for Azure Local](https://learn.microsoft.com/azure/azure-local/update/update-troubleshooting-23h2). |
-| `SOLUTION_UPDATE_NOT_RESUMED` | The update did not start again. The script prints the reason. | Select **Try again** on the failed update in the Azure portal. If it still does not start, [contact Microsoft support](#when-to-contact-microsoft-support). |
-
-### Resume a deployment
-
-Do this only when the operation that failed was a deployment.
-
-**Automation boundary.** A person must resume a deployment in the Azure portal. It cannot be resumed from a script on the machine.
-
-**Changes:** resumes the deployment from the step that failed.
-
-In the Azure portal, open your Azure Local instance, go to **Deployments**, and select **Resume deployment**. The deployment should continue past the step that failed.
+| `SOLUTION_UPDATE_RESUMED` | The update is installing again. Its `State` in the list is `Installing`. | Follow its progress under **Updates** for your Azure Local instance. It should continue past the step that failed. |
+| `NO_UPDATE_TO_RESUME` | No solution update failed during installation. | If an update in the list shows `HealthCheckFailed`, it failed in its readiness check: retry it the same way you started it, with **Try again** on the update or with the same `Start-SolutionUpdate` command (including `-PrepareOnly` if you used it). If an upgrade, add node, or repair node operation failed, retry it the same way you started it. |
+| `UPDATE_SERVICE_NOT_AVAILABLE` | The solution update service did not answer. This is expected while the system is still being deployed. | If a deployment failed, resume it: open your Azure Local instance, go to **Deployments**, and select **Resume deployment**, as described in [Deploy Azure Local using the Azure portal](https://learn.microsoft.com/azure/azure-local/deploy/deploy-via-portal#resume-deployment). On a deployed system, see [Troubleshoot solution updates for Azure Local](https://learn.microsoft.com/azure/azure-local/update/update-troubleshooting-23h2). |
+| `SOLUTION_UPDATE_NOT_RESUMED` | The update did not start again. The script prints the reason. | Select **Try again** on the failed update under **Updates**. If it still does not start, [contact Microsoft support](#when-to-contact-microsoft-support). |
+| `RETRY_BLOCKED` | This machine is not clean yet. | Finish the steps in [Mitigation Details](#mitigation-details) on this machine first. |
 
 ## Rollback
 
