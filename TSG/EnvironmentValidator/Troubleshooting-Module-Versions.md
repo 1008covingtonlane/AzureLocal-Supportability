@@ -447,7 +447,11 @@ Step 2 does not stop programs that are not PowerShell sessions or that run a Win
 
 **Changes:** ends each program that you close, and any work that is not saved in it. Signing a user out ends all of that user's programs on this machine. Running VMs are not affected.
 
-Do this step only if Step 1 printed `OTHER_HOLDERS_FOUND`; if it printed anything else, there is nothing to close. Close each program that Step 1 lists with `Step 2 does not stop it. See Step 3.` in its `NextStep`, or ask the user shown in its `Owner` to close it. If that user is not available, sign them out of this machine with the `logoff` command and the `SessionId` that Step 1 shows for the program. If the program runs a Windows service (its `Service` field is not empty), or you cannot close it, leave it running: the cleanup in Step 5 removes what it can, and Step 6 tells you whether a restart is needed.
+Do this step only if Step 1 printed `OTHER_HOLDERS_FOUND`. If it printed anything else, there is nothing to close.
+
+1. Close each program that Step 1 lists as not stopped by Step 2, or ask the user shown as its owner to close it.
+2. If that user is not available, sign the user out of this machine with the `logoff` command and the session ID that Step 1 shows for the program.
+3. Leave a program running if it runs a Windows service or if you cannot close it. The cleanup in Step 5 removes what it can, and Step 6 tells you whether a restart is needed.
 
 When you are done, go to Step 4. It checks whether the files are still in use.
 
