@@ -189,7 +189,7 @@ Run these steps in order on each affected machine, in one PowerShell window: Ste
 
 This step changes nothing. It asks Windows Restart Manager which processes hold files in the external copy's version-number folders, lists each one with its owner, sign-in session, start time, Windows service, and command line, and says in `NextStep` what to do about it. `Get-Process` does not show these files, because PowerShell loads the module's .NET files in a way that it does not list. Remote PowerShell sessions appear as `wsmprovhost`.
 
-The script marks a process `Step 2 stops it.` only if it is a PowerShell window (`powershell` or `pwsh`) that a person started: it does not run as SYSTEM, LocalService, NetworkService, or an account that runs a Windows service, does not run or belong to a Windows service, and is in a signed-in user's session. It never marks a remote session (`wsmprovhost`), because Azure Local's own operations also run in remote sessions, and the two look the same. It saves the marked processes, by process ID and start time, for Step 2.
+The script marks a process `Step 2 stops it.` only if it is a PowerShell window (`powershell`, `powershell_ise`, or `pwsh`) that a person started: it does not run as SYSTEM, LocalService, NetworkService, or an account that runs a Windows service, does not run or belong to a Windows service, and is in a signed-in user's session. It never marks a remote session (`wsmprovhost`), because Azure Local's own operations also run in remote sessions, and the two look the same. It saves the marked processes, by process ID and start time, for Step 2.
 
 ```powershell
 . {
@@ -278,13 +278,14 @@ public static class EnvCheckerFileHolders {
             $hostsService = $servicePids -contains $id
             $serviceParent = ($servicePids -contains $process.ParentProcessId) -or ($parent.Name -eq 'services.exe')
             $userAccount = $sid -and ($serviceSids -notcontains $sid)
-            if ('powershell', 'pwsh' -contains $name) { $canStop = $userAccount -and -not $hostsService -and -not $serviceParent -and ($process.SessionId -ne 0) }
+            if ('powershell', 'pwsh', 'powershell_ise' -contains $name) { $canStop = $userAccount -and -not $hostsService -and -not $serviceParent -and ($process.SessionId -ne 0) }
             else { $canStop = $false }
             if ($id -eq $PID) { $canStop = $false; $next = 'This PowerShell window holds the files. Close it, open a new window, and start again at Step 1.' }
             elseif ($canStop) { $next = 'Step 2 stops it.' }
             elseif ($name -eq 'wsmprovhost' -and $userAccount -and -not $hostsService) { $next = "Remote PowerShell session of $ownerName. Ask them to end it on the computer that opened it. If no one can, leave it running; Step 5 removes what it can." }
             elseif (-not $userAccount -or $hostsService -or $serviceParent) { $next = 'It runs as or for a Windows service. Leave it running; Step 5 removes what it can, and Step 6 says whether a restart is needed.' }
             elseif ($process.SessionId -eq 0) { $next = "Ask $ownerName to close it or end their remote session. Never sign out session 0." }
+            elseif ($process.SessionId -eq (Get-Process -Id $PID).SessionId) { $next = 'It runs in your own sign-in session. Close it.' }
             else { $next = "Ask $ownerName to close it. If that is not possible, sign the user out with: logoff $($process.SessionId)" }
             [pscustomobject]@{
                 ProcessId   = $id
@@ -306,10 +307,6 @@ public static class EnvCheckerFileHolders {
     if ($checkError) {
         Write-Output 'LOCK_CHECK_UNAVAILABLE'
         Write-Output "Restart Manager could not be used in this PowerShell session: $checkError"
-        Write-Output 'These PowerShell processes are running. Any of them could hold the files:'
-        Get-CimInstance -ClassName Win32_Process -ErrorAction SilentlyContinue |
-            Where-Object { 'powershell.exe', 'pwsh.exe', 'wsmprovhost.exe' -contains $_.Name } |
-            Format-Table ProcessId, Name, SessionId, CreationDate, CommandLine -AutoSize -Wrap
     }
     elseif ($holders.Count -eq 0) {
         Write-Output 'NO_LOCKING_SESSIONS'
@@ -329,7 +326,7 @@ public static class EnvCheckerFileHolders {
 | `LOCKING_SESSIONS_FOUND` | Only PowerShell sessions that Step 2 stops hold the files. Check each `Owner` and `CommandLine` before you continue. | Go to Step 2. |
 | `OTHER_HOLDERS_FOUND` | At least one listed process is one that Step 2 does not stop. Its `NextStep` says what to do. | Go to Step 2, then Step 3. |
 | `NO_LOCKING_SESSIONS` | No process holds the files. | Go to Step 5. |
-| `LOCK_CHECK_UNAVAILABLE` | Restart Manager could not run in this session, so the script lists every PowerShell process instead, and Step 2 stops nothing. The cleanup in Step 5 still removes the copy's module manifest, so the copy stops loading even if some files stay in use. | Close the listed PowerShell windows and remote sessions that you or your team opened, then go to Step 5. |
+| `LOCK_CHECK_UNAVAILABLE` | Restart Manager could not run in this session, so nothing was checked, and Step 2 stops nothing. The cleanup in Step 5 still removes the copy's module manifest, so the copy stops loading even if some files stay in use. | Close any other PowerShell window that you opened on this machine and no longer need, then go to Step 5. |
 | `WINDOWS_POWERSHELL_REQUIRED` | The script ran in PowerShell 7 and checked nothing. | Open Windows PowerShell 5.1 as administrator and run Step 1 again. |
 
 ### Step 2: Stop the PowerShell sessions that hold the files
@@ -390,8 +387,8 @@ Run this in the same window, after you have read the Step 1 list. It stops a pro
 
 | Result | Meaning | Next step |
 | --- | --- | --- |
-| `SESSIONS_STOPPED` | The script stopped the sessions it lists, and lists each process that it left running. | Go to Step 3. |
-| `NO_SESSIONS_STOPPED` | No reviewed session still held the files. | Go to Step 3. |
+| `SESSIONS_STOPPED` | The script stopped the sessions it lists, and lists each process that it left running. | Go to Step 3 if Step 1 printed `OTHER_HOLDERS_FOUND`; otherwise go to Step 4. |
+| `NO_SESSIONS_STOPPED` | No reviewed session still held the files. | Go to Step 3 if Step 1 printed `OTHER_HOLDERS_FOUND`; otherwise go to Step 4. |
 | `UPDATE_IN_PROGRESS` | A solution update or a health check is running, so nothing was stopped. Its PowerShell sessions can hold the files. | Wait until the update stops, then start again at Step 1. |
 | `UPDATE_STATE_UNKNOWN` | The update state could not be read, so nothing was stopped. | Run Step 2 again in a minute. If it keeps printing this, go to Step 5. |
 | `STEP_1_NOT_RUN` or `LOCK_CHECK_UNAVAILABLE` | Nothing was stopped. | Run Step 1 in this window, then this step again. If Step 1 prints `LOCK_CHECK_UNAVAILABLE`, follow its row. |
@@ -589,7 +586,7 @@ Do not use the system health check to confirm this fix. It can keep showing a pr
 
 ## Retry the failed operation
 
-Run this script on one machine, after [Verify the fix](#verify-the-fix) printed `ALL_MACHINES_CLEAN`, or printed `THIS_MACHINE_CLEAN` on every machine. It first checks this machine and every other machine that it can reach, the same way as Verify the fix, and it retries nothing if one of them is not clean. It then resumes a solution update whose installation failed with the error in this article. For any other operation, it prints how to retry it. Paste or run the whole block at once.
+Run this script on one machine, after [Verify the fix](#verify-the-fix) printed `ALL_MACHINES_CLEAN`, or printed `THIS_MACHINE_CLEAN` on every machine. It first checks this machine and every other machine that it can reach, the same way as Verify the fix, and it retries nothing if one of them is not clean. A machine that it cannot reach does not stop the retry, so run Verify the fix on each such machine first. It then resumes a solution update whose installation failed with the error in this article. For any other operation, it prints how to retry it. Paste or run the whole block at once.
 
 **Changes:** resumes the update only when this machine and every machine that the script can reach are clean, no update is downloading, preparing, installing, or running health checks, and exactly one update is in the `InstallationFailed` state with the error from [Symptoms](#symptoms) in its last run. The update continues from the step that failed. In every other case the script changes nothing.
 
@@ -660,6 +657,10 @@ Run this script on one machine, after [Verify the fix](#verify-the-fix) printed 
             $notCheckedLines
         } else {
             $active = @($updates | Where-Object { ('Installing', 'Preparing', 'HealthChecking', 'Downloading', 'ScanInProgress' -contains $_.State) -or ($_.HealthState -eq 'InProgress') })
+            try {
+                $environment = Get-SolutionUpdateEnvironment -ErrorAction Stop 4>$null
+                if (("$($environment.State)" -like '*InProgress*') -or ("$($environment.HealthState)" -eq 'InProgress')) { $active += [pscustomobject]@{ DisplayName = 'The system health check'; State = 'InProgress' } }
+            } catch { }
             $failed = @($updates | Where-Object { $_.State -eq 'InstallationFailed' })
             $related = $false
             if ($failed.Count -eq 1) {
