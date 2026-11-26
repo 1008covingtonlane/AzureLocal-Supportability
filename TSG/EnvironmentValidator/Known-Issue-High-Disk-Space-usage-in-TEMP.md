@@ -50,7 +50,7 @@ TEMP here is the temporary files folder of the `HCIOrchestrator` account. Each l
 
 When Azure Local runs the Environment Checker health checks for a solution update, it uses the Environment Checker version in the update package. Earlier builds copied that package into a new folder with a random name in the `HCIOrchestrator` account's TEMP folder each time, and never removed it.
 
-Current builds use one reusable folder named `AzStackHci.EnvironmentChecker.NugetsForUpdate` instead. When they run these checks, they also remove random-named folders that are more than one day old, but only from the TEMP folder on the node where the Azure Stack HCI Orchestrator Service is running. Folders that earlier builds left on the other nodes stay there until you remove them with the steps below, so check every node. The steps are safe on any build, so you do not need to know which build added this change.
+Current builds use one reusable folder named `AzStackHci.EnvironmentChecker.NugetsForUpdate` instead. When they run these checks, they also remove random-named folders that are more than one day old, but only from the TEMP folder on the node where the Azure Stack HCI Orchestrator Service is running at the time. Folders on the other nodes stay until the service runs these checks there, or until you remove them with the steps below, so check every node. The steps are safe on any build, so you do not need to know which build added this change.
 
 On current builds, the `AzStackHci.EnvironmentChecker.NugetsForUpdate` folder can be present after an update. It is expected, and the steps below do not count or remove it.
 
@@ -141,7 +141,7 @@ Expected output (no output means that the script found no `AzStackHci.Environmen
 - `Skipping removal ... less than 1 days.` means that folder was changed in the last day. It is left in place.
 - `Unable to remove temp nuget folder` (in red) means a file in that folder is in use or access was denied. Run the script again later. If the same folder still cannot be removed, see [When to contact Microsoft support](#when-to-contact-microsoft-support).
 
-This is the same rule that current builds use to remove these folders automatically, but they apply it only on the node where the Azure Stack HCI Orchestrator Service is running.
+This is the same rule that current builds use to remove these folders automatically, but they apply it only on the node where the Azure Stack HCI Orchestrator Service is running at the time.
 
 ## Verify the fix
 
