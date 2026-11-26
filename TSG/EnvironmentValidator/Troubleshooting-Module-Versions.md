@@ -547,9 +547,7 @@ When every machine is clean, retry the operation as described in [Retry the fail
 
 ## Retry the failed operation
 
-Retry only after [Verify the fix](#verify-the-fix) shows every machine clean. Run this script on one machine of the deployed system.
-
-**Automation boundary.** The script resumes only a solution update that failed during installation. A person resumes a deployment, and a person retries an upgrade, add node, or repair node operation, as the table below describes. The script never restarts a machine.
+Retry only after [Verify the fix](#verify-the-fix) shows every machine clean. Run this script on one machine. It resumes a solution update that failed during installation. For any other operation, it prints how to retry it.
 
 **Changes:** resumes the update only when this machine is clean and exactly one update is in the `InstallationFailed` state. The update continues from the step that failed. In every other case the script changes nothing and only lists the updates.
 
@@ -571,6 +569,7 @@ if ($inbox.Count -eq 0 -or $external.Count -gt 0) {
     if ($null -eq $updates) {
         Write-Output "UPDATE_SERVICE_NOT_AVAILABLE"
         Write-Output "Could not read solution updates on this machine: $updateError"
+        Write-Output "If a deployment failed, resume it: open your Azure Local instance, go to Deployments, and select Resume deployment."
     } else {
         $failed = @($updates | Where-Object { $_.State -eq 'InstallationFailed' })
         if ($failed.Count -eq 1) {
@@ -593,6 +592,7 @@ if ($inbox.Count -eq 0 -or $external.Count -gt 0) {
             Write-Output "More than one update is in the InstallationFailed state, so none was resumed."
         } else {
             Write-Output "NO_UPDATE_TO_RESUME"
+            Write-Output "No solution update failed during installation. Retry the operation that failed the same way you started it. An update that shows HealthCheckFailed failed in its readiness check: select Try again on it, or run the same Start-SolutionUpdate command again."
         }
         Get-SolutionUpdate -ErrorAction SilentlyContinue | Format-Table DisplayName, Version, State -AutoSize
     }
@@ -602,9 +602,9 @@ if ($inbox.Count -eq 0 -or $external.Count -gt 0) {
 | Result | Meaning | What to do |
 | --- | --- | --- |
 | `SOLUTION_UPDATE_RESUMED` | The update is installing again. Its `State` in the list is `Installing`. | Follow its progress under **Updates** for your Azure Local instance. It should continue past the step that failed. |
-| `NO_UPDATE_TO_RESUME` | No solution update failed during installation. | If an update in the list shows `HealthCheckFailed`, it failed in its readiness check: retry it the same way you started it, with **Try again** on the update or with the same `Start-SolutionUpdate` command (including `-PrepareOnly` if you used it). If an upgrade, add node, or repair node operation failed, retry it the same way you started it. |
-| `UPDATE_SERVICE_NOT_AVAILABLE` | The solution update service did not answer. This is expected while the system is still being deployed. | If a deployment failed, resume it: open your Azure Local instance, go to **Deployments**, and select **Resume deployment**, as described in [Deploy Azure Local using the Azure portal](https://learn.microsoft.com/azure/azure-local/deploy/deploy-via-portal#resume-deployment). On a deployed system, see [Troubleshoot solution updates for Azure Local](https://learn.microsoft.com/azure/azure-local/update/update-troubleshooting-23h2). |
-| `SOLUTION_UPDATE_NOT_RESUMED` | The update did not start again. The script prints the reason. | Select **Try again** on the failed update under **Updates**. If it still does not start, [contact Microsoft support](#when-to-contact-microsoft-support). |
+| `NO_UPDATE_TO_RESUME` | No solution update failed during installation, so nothing was resumed. The script prints how to retry other operations, including an update that failed in its readiness check (`HealthCheckFailed`). | Retry the operation that failed the same way you started it. If you started a readiness check with `Start-SolutionUpdate -PrepareOnly`, use the same command again. |
+| `UPDATE_SERVICE_NOT_AVAILABLE` | The solution update service did not answer. This is expected while the system is still being deployed. | For a deployment, see [Resume deployment](https://learn.microsoft.com/azure/azure-local/deploy/deploy-via-portal#resume-deployment). On a deployed system, see [Troubleshoot solution updates for Azure Local](https://learn.microsoft.com/azure/azure-local/update/update-troubleshooting-23h2). |
+| `SOLUTION_UPDATE_NOT_RESUMED` | The update did not start again. The script prints the reason. | Retry the update the same way you started it. If it still does not start, [contact Microsoft support](#when-to-contact-microsoft-support). |
 | `RETRY_BLOCKED` | This machine is not clean yet. | Finish the steps in [Mitigation Details](#mitigation-details) on this machine first. |
 
 ## Rollback
