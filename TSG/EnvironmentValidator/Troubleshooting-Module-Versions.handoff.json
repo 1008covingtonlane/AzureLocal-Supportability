@@ -6,13 +6,21 @@
     "classifier": "written to the tsg-forge-handoff/v1 contract"
   },
   "source": {
-    "sha256": "d7bafda8d44b1e410f9e7329e1439440ade58deb8fd3fc21db1dc7674dd9181c",
+    "sha256": "3aeba994427b630b4b601f155860039ce73587b8379143528acdbdb11f5f33f6",
     "path": "TSG/EnvironmentValidator/Troubleshooting-Module-Versions.md"
   },
   "article": {
     "title": "Troubleshoot Environment Checker module versions",
     "surface": "on-device",
     "catalog": "eligible"
+  },
+  "validation": {
+    "fidelity_level": "L4",
+    "technical_grade": "A",
+    "reproduction_substrate": "hardware",
+    "automation_status": "proven",
+    "last_validated": "2026-11-26",
+    "spec_ref": "AzStackHci_EnvironmentChecker_ModuleShadowing"
   },
   "handoffs": [
     {
@@ -26,7 +34,7 @@
           "Mitigation Details",
           "Step 3: Close the other programs that hold the files"
         ],
-        "line": 450,
+        "line": 442,
         "class": "operator-required",
         "needs": [],
         "source_sha256": "15edba6ad6358fbe6e6c8c717c38b87527f3e479c4f2a4b6b6d2dc777b2519e0"
@@ -61,7 +69,7 @@
             ],
             "source": {
               "section": "Mitigation Details > Step 4: Confirm that the files are released",
-              "line": 463,
+              "line": 455,
               "kind": "code",
               "sha256": "6fcd521bc039c4464e372645f9a21a3e6f46094c81264ddeaa94912543e74f38"
             }
