@@ -521,7 +521,7 @@ if ($remaining.Count -eq 0) {
 | Result | Meaning | What to do |
 | --- | --- | --- |
 | `NO_RESTART_NEEDED` | The external copy no longer loads. | Go to Step 6. |
-| `RESTART_REQUIRED` | The external copy is still listed, and only a restart releases the files that hold it. The script prints the safe way to restart this machine for its cluster size, with a link to [Suspend and resume Azure Local machines for planned maintenance](https://learn.microsoft.com/azure/azure-local/manage/suspend-resume-cluster-maintenance). On a single-machine instance, the restart stops all running VMs and needs a maintenance window. Until the restart, Step 6 deletes nothing and the retry script retries nothing. | Follow the printed guidance. |
+| `RESTART_REQUIRED` | The external copy is still listed, and only a restart releases the files that hold it. The script prints the maintenance procedure that fits this machine's cluster size. On a single-machine instance, a restart stops all running VMs. Until the restart, Step 6 deletes nothing and the retry script retries nothing. | Follow the printed guidance. |
 
 ### Step 6: Delete leftover folders
 
