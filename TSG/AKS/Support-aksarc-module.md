@@ -1,17 +1,9 @@
 <!-- tsg-metadata
 {
-  "schema": "azure-local-supportability/tsg-metadata/v1",
+  "schema": "azure-local-supportability/tsg-metadata/v2",
   "document_type": "troubleshoot",
   "products": ["Azure Local", "Azure Local VMs", "AKS enabled by Azure Arc"],
-  "detector": {"type": "command", "signal": "Test-SupportAksArcKnownIssues"},
-  "validation": {
-    "fidelity_level": "L4",
-    "technical_grade": "A",
-    "reproduction_substrate": "vm",
-    "automation_status": "proven",
-    "last_validated": "2026-11-25",
-    "spec_ref": "AzLocal_AKSArc_SupportModule_KnownIssues"
-  }
+  "detector": {"type": "command", "signal": "Test-SupportAksArcKnownIssues"}
 }
 -->
 
