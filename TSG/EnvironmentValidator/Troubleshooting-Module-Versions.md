@@ -72,7 +72,7 @@ Type 'ValidateConnectivity' of Role 'EnvironmentValidator' raised an exception:
 }
 ```
 
-**Newer builds** (confirmed on Environment Checker 10.2510.0.2100): Azure Local removes the extra copy by itself on the machine running the Orchestrator Service, and fails only when it cannot delete the files, usually because a PowerShell session still has the module loaded. The error links to this article. For example (the version folder and file name vary):
+**Newer builds** (example from Environment Checker 10.2510.0.2100): Azure Local removes the extra copy by itself on the machine running the Orchestrator Service, and fails only when it cannot delete the files, usually because a PowerShell session still has the module loaded. The error links to this article. For example (the version folder and file name vary):
 
 ```text
 Unable to remove module files at C:\Program Files\WindowsPowerShell\Modules\AzStackHci.EnvironmentChecker\1.0.0. Error: Access to the path 'Microsoft.AzureStack.Observability.Standalone.dll' is denied.. Please follow https://aka.ms/envchkrversiontsg to remove the module manually before retrying lifecycle operation.
