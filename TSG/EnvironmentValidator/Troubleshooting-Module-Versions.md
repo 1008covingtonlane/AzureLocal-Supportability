@@ -37,7 +37,7 @@
 | --- | --- |
 | 2026-11-20 | Corrected the expected inbox module path and the Issue Validation command. Added the error that newer builds show, steps for module files that are still in use, commands for all machines, and guidance to verify, escalate, and prevent the problem. Added the metadata marker. Step 1 now lists every PowerShell session that could hold the external copy's files, including remote sessions, and the impact labels are replaced with plain statements of what each step changes. |
 | 2026-11-26 | Step 1 now names the exact processes that hold the files, Step 2 stops only the user PowerShell sessions from that reviewed list while no update is running, and new scripts check every reachable machine and resume an update that failed with this error. Step 2 and Step 6 now stop when they cannot tell whether the machine is in a cluster, and the retry script resumes an update only when a failed step shows the error. |
-| 2026-11-27 | Step 1 saves its list in a folder that only administrators can change, and Step 2 reads it from there, so each step can run in its own PowerShell window or process. Step 2 stops a window only when it can trace it back to the Windows desktop, and it checks that it is still the same process before it stops it. Step 3 now says where to stop and confirm, Step 4 again checks the files directly and reports a file that it cannot open, and a machine with only a leftover folder follows all the steps. |
+| 2026-11-27 | Step 1 saves its list in a folder that only administrators can change, and Step 2 reads it from there, so each step can run in its own PowerShell window or process. Step 2 stops a window only when it can trace it back to the SConfig menu, the command prompt that opens at sign-in, or File Explorer, and it checks that it is still the same process before it stops it. Step 3 now says where to stop and confirm, Step 4 again checks the files directly and reports a file that it cannot open, and a machine with only a leftover folder follows all the steps. |
 
 ## At a glance
 
@@ -190,7 +190,7 @@ Run these steps in order on each affected machine. Step 2 uses the list that Ste
 
 This step asks Windows Restart Manager which processes hold files in the external copy's folders, including a copy outside `C:\Program Files`, for example one installed for the current user only, and in leftover version-number folders, lists each one with its owner, sign-in session, start time, Windows service, and command line, and says in `NextStep` what to do about it. `Get-Process` does not show these files, because PowerShell loads the module's .NET files in a way that it does not list. Remote PowerShell sessions appear as `wsmprovhost`.
 
-The script marks a process `Step 2 stops it.` only if it is a PowerShell window (`powershell`, `powershell_ise`, or `pwsh`) that a person started: it does not run as SYSTEM, LocalService, NetworkService, or an account that runs a Windows service, does not run or belong to a Windows service, is in a signed-in user's session, and was opened from the Windows desktop: its parent processes in that session lead back to File Explorer, with no service, Task Scheduler, WMI, or remote session host between them. If Step 1 cannot confirm that, for example because a parent process has already ended or the machine has no Windows desktop, it does not mark the window, and you close it in Step 3. It never marks a remote session (`wsmprovhost`), because Azure Local's own operations also run in remote sessions, and the two look the same. It saves the list, with each process's ID, start time, name, owner, and whether it is marked, for Step 2. If it cannot save the list, it says so after its result line, and Step 2 stops nothing.
+The script marks a process `Step 2 stops it.` only if it is a PowerShell window (`powershell`, `powershell_ise`, or `pwsh`) that a person started: it does not run as SYSTEM, LocalService, NetworkService, or an account that runs a Windows service, does not run or belong to a Windows service, is in a signed-in user's session, and was opened by a person signed in to this machine: its parent processes in that session lead back to the SConfig menu or the command prompt that opens when you sign in to the machine, or to File Explorer on a machine with the desktop, with no service, Task Scheduler, WMI, or remote session host between them. If Step 1 cannot confirm that, for example because a parent process has already ended, it does not mark the window, and you close it in Step 3. It never marks a remote session (`wsmprovhost`), because Azure Local's own operations also run in remote sessions, and the two look the same. It saves the list, with each process's ID, start time, name, owner, and whether it is marked, for Step 2. If it cannot save the list, it says so after its result line, and Step 2 stops nothing.
 
 **Changes:** saves the list to `Step1List.json` in the folder `C:\ProgramData\AzStackHci.EnvironmentChecker.Step1`, replacing an earlier list. It creates the folder if needed and sets its permissions so that only Administrators and SYSTEM can change it. When no process holds the files, it deletes the folder and saves nothing. Step 2 deletes the folder when it ends. Nothing else changes.
 
@@ -272,6 +272,8 @@ public static class EnvCheckerFileHolders {
         })
         $byId = @{}
         foreach ($p in @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)) { $byId[[int]$p.ProcessId] = $p }
+        $hostNames = 'services.exe', 'svchost.exe', 'taskhostw.exe', 'taskeng.exe', 'wmiprvse.exe', 'wsmprovhost.exe', 'winrshost.exe'
+        $isHost = { param($q) ($q.SessionId -ne $process.SessionId) -or ($servicePids -contains $q.ProcessId) -or ($hostNames -contains $q.Name) }
         foreach ($id in $holderIds) {
             $process = $byId[[int]$id]
             if (-not $process) { continue }
@@ -285,14 +287,17 @@ public static class EnvCheckerFileHolders {
             for ($depth = 0; $depth -lt 16 -and $origin -eq 'Unknown'; $depth++) {
                 $up = $byId[[int]$child.ParentProcessId]
                 if (-not $up -or ($up.CreationDate -gt $child.CreationDate)) { break }
-                if (($up.SessionId -ne $process.SessionId) -or ($servicePids -contains $up.ProcessId) -or ('services.exe', 'svchost.exe', 'taskhostw.exe', 'taskeng.exe', 'wmiprvse.exe', 'wsmprovhost.exe' -contains $up.Name)) { $origin = 'Service' }
-                elseif ('explorer.exe', 'userinit.exe', 'winlogon.exe' -contains $up.Name) { $origin = 'Desktop' }
+                if (& $isHost $up) { $origin = 'Service' }
+                elseif (('explorer.exe', 'servercoreshell.exe' -contains $up.Name) -or (($up.Name -eq 'cmd.exe') -and ("$($up.CommandLine)" -like '*runonce.exe /AlternateShellStartup*'))) {
+                    $top = $byId[[int]$up.ParentProcessId]
+                    if ($top -and ($top.CreationDate -le $up.CreationDate) -and (& $isHost $top)) { $origin = 'Service' } else { $origin = 'SignIn' }
+                }
                 else { $child = $up }
             }
             $userAccount = $sid -and ($serviceSids -notcontains $sid)
             $isPowerShell = 'powershell', 'pwsh', 'powershell_ise' -contains $name
-            $canStop = $isPowerShell -and $userAccount -and -not $hostsService -and ($origin -eq 'Desktop') -and ($process.SessionId -ne 0)
-            $why = if ($isPowerShell -and $origin -eq 'Unknown') { 'Step 2 could not confirm that a person opened it from the desktop, so it does not stop it. ' } else { '' }
+            $canStop = $isPowerShell -and $userAccount -and -not $hostsService -and ($origin -eq 'SignIn') -and ($process.SessionId -ne 0)
+            $why = if ($isPowerShell -and $origin -eq 'Unknown') { 'Step 2 could not confirm that a person signed in to this machine opened it, so it does not stop it. ' } else { '' }
             if ($id -eq $PID) { $canStop = $false; $next = 'This PowerShell window holds the files. Close it, open a new window, and start again at Step 1.' }
             elseif ($canStop) { $next = 'Step 2 stops it.' }
             elseif ($name -eq 'wsmprovhost' -and $userAccount -and -not $hostsService) { $next = "Remote PowerShell session of $ownerName. Ask them to end it on the computer that opened it. If no one can, leave it running; Step 5 removes what it can." }
@@ -467,6 +472,8 @@ public static class EnvCheckerFileHolders {
             })
             $byId = @{}
             foreach ($p in @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)) { $byId[[int]$p.ProcessId] = $p }
+            $hostNames = 'services.exe', 'svchost.exe', 'taskhostw.exe', 'taskeng.exe', 'wmiprvse.exe', 'wsmprovhost.exe', 'winrshost.exe'
+            $isHost = { param($q) ($q.SessionId -ne $process.SessionId) -or ($servicePids -contains $q.ProcessId) -or ($hostNames -contains $q.Name) }
             foreach ($id in $holderIds) {
                 $process = $byId[[int]$id]
                 if (-not $process) { continue }
@@ -480,14 +487,17 @@ public static class EnvCheckerFileHolders {
                 for ($depth = 0; $depth -lt 16 -and $origin -eq 'Unknown'; $depth++) {
                     $up = $byId[[int]$child.ParentProcessId]
                     if (-not $up -or ($up.CreationDate -gt $child.CreationDate)) { break }
-                    if (($up.SessionId -ne $process.SessionId) -or ($servicePids -contains $up.ProcessId) -or ('services.exe', 'svchost.exe', 'taskhostw.exe', 'taskeng.exe', 'wmiprvse.exe', 'wsmprovhost.exe' -contains $up.Name)) { $origin = 'Service' }
-                    elseif ('explorer.exe', 'userinit.exe', 'winlogon.exe' -contains $up.Name) { $origin = 'Desktop' }
+                    if (& $isHost $up) { $origin = 'Service' }
+                    elseif (('explorer.exe', 'servercoreshell.exe' -contains $up.Name) -or (($up.Name -eq 'cmd.exe') -and ("$($up.CommandLine)" -like '*runonce.exe /AlternateShellStartup*'))) {
+                        $top = $byId[[int]$up.ParentProcessId]
+                        if ($top -and ($top.CreationDate -le $up.CreationDate) -and (& $isHost $top)) { $origin = 'Service' } else { $origin = 'SignIn' }
+                    }
                     else { $child = $up }
                 }
                 $userAccount = $sid -and ($serviceSids -notcontains $sid)
                 $isPowerShell = 'powershell', 'pwsh', 'powershell_ise' -contains $name
-                $canStop = $isPowerShell -and $userAccount -and -not $hostsService -and ($origin -eq 'Desktop') -and ($process.SessionId -ne 0)
-                $why = if ($isPowerShell -and $origin -eq 'Unknown') { 'Step 2 could not confirm that a person opened it from the desktop, so it does not stop it. ' } else { '' }
+                $canStop = $isPowerShell -and $userAccount -and -not $hostsService -and ($origin -eq 'SignIn') -and ($process.SessionId -ne 0)
+                $why = if ($isPowerShell -and $origin -eq 'Unknown') { 'Step 2 could not confirm that a person signed in to this machine opened it, so it does not stop it. ' } else { '' }
                 if ($id -eq $PID) { $canStop = $false; $next = 'This PowerShell window holds the files. Close it, open a new window, and start again at Step 1.' }
                 elseif ($canStop) { $next = 'Step 2 stops it.' }
                 elseif ($name -eq 'wsmprovhost' -and $userAccount -and -not $hostsService) { $next = "Remote PowerShell session of $ownerName. Ask them to end it on the computer that opened it. If no one can, leave it running; Step 5 removes what it can." }
