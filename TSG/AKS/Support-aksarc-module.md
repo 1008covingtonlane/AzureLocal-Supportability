@@ -220,12 +220,32 @@ else { 'NO-MANUAL-RESTART' }
 ```
 
 - `NO-MANUAL-RESTART`: continue with [Verify the fix](#verify-the-fix).
-- `MANUAL-RESTART-NEEDED`: the message names the machine. Restart that machine as described in [Suspend and resume Azure Local machines for maintenance](https://learn.microsoft.com/azure/azure-local/manage/suspend-resume-cluster-maintenance), then run this check again. If it still prints `MANUAL-RESTART-NEEDED`, contact Microsoft Support.
+- `MANUAL-RESTART-NEEDED`: the message names the machine. Run `Get-ClusterNode` to see its state:
+  - If the machine is `Up` or `Paused`, restart it as described in [Suspend and resume Azure Local machines for maintenance](https://learn.microsoft.com/azure/azure-local/manage/suspend-resume-cluster-maintenance).
+  - If the machine is `Down`, follow [If the machine is Down](#if-the-machine-is-down).
+
+  Then run this check again. If it still prints `MANUAL-RESTART-NEEDED`, contact Microsoft Support.
 - `TEST-DID-NOT-RUN`: at least one of the two tests ran no checks, so the check can't say that no restart is needed. Use the results table above to find out why, and then run this check again.
 
-**Changes:** the restart moves the machine's workloads to other machines, restarts it, and returns it to the instance.
+**Changes:** the restart moves the machine's workloads to other machines, restarts it, and returns it to the instance. On a single-machine instance there is no other machine, so its VMs stop until the restart finishes.
 
 **Plan for:** the instance runs with one machine fewer until the restart finishes. Restart in a maintenance window.
+
+#### If the machine is Down
+
+A machine that is `Down` isn't running any workloads, so you don't need to drain or suspend it first.
+
+1. Turn on or restart the machine, from its baseboard management controller (BMC) or at the machine.
+2. After it starts, run this on any machine that is `Up` (on a single-machine instance, on that machine), until the machine shows `Up`:
+
+   ```powershell
+   Get-ClusterNode | Format-Table Name, State
+   ```
+
+3. If the machine shows `Paused`, resume it with `Resume-ClusterNode -Name` followed by the machine name.
+4. Run the check above again.
+
+**Changes:** starts the machine and returns it to the instance. It doesn't move or stop any workload. On a single-machine instance, every VM already stopped when the machine went `Down`. Clustered VMs normally start again when the instance brings its roles back online; check that the VMs you need are running.
 
 ### Verify the fix
 
