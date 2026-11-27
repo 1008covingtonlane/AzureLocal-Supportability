@@ -32,7 +32,7 @@
       "article_reason": [
         "`MANUAL-RESTART-NEEDED`: the message names the machine. Restart that machine as described in [Suspend and resume Azure Local machines for maintenance](https://learn.microsoft.com/azure/azure-local/manage/suspend-resume-cluster-maintenance), then run this check again."
       ],
-      "run_on": "node",
+      "run_on": "off-node",
       "families": [],
       "instructions": {
         "text": "`MANUAL-RESTART-NEEDED`: the message names the machine. Restart that machine as described in [Suspend and resume Azure Local machines for maintenance](https://learn.microsoft.com/azure/azure-local/manage/suspend-resume-cluster-maintenance), then run this check again."
