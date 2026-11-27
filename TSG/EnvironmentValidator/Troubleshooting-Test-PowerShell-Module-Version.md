@@ -53,7 +53,7 @@
 | 2026-11-25 | When a check before the recipe-aware helper fails, the article now says that the manual alternative is for nodes without the helper and stops on a node that has it, with `Use the recipe-aware helper instead of the manual alternative.`, and that this message does not mean the helper is safe to run. Before, it pointed to the manual alternative as if it could run there. |
 | 2026-11-25 | In the per-node view of the last system health check in [Symptoms](#symptoms), a node that has no entry, or an entry without a `Detail`, now goes to the read-only check in [Issue validation](#issue-validation). The article no longer says why an entry can be missing. |
 | 2026-11-25 | [Administrator detection surfaces](#administrator-detection-surfaces) now covers Windows Admin Center in the Azure portal: its **Events** tool shows the same Event ID 17205 entry. |
-| 2026-11-26 | The manual alternative no longer asks you to type a module name and a repository name. It reads the module from the current validator failure, one module each time it runs (Az modules other than `Az.Accounts` first, then `Az.Accounts`, then the others), and uses the registered repository that has the recipe version, as the helper does, and prints both. It stops before any change if the validator reports a module as not installed, or if no registered repository, or more than one, has the recipe version. When other modules are still newer than the recipe, it says so at the end, so you run it again. |
+| 2026-11-26 | The manual alternative no longer asks you to type a module name and a repository name. It reads the module from the current validator failure, one module each time it runs (Az modules other than `Az.Accounts` first, then `Az.Accounts`, then the others), and uses the registered repository that has the recipe version, as the helper does, and prints both. It stops before any change if the validator reports a module as not installed, or if no registered repository, or more than one, has the recipe version. When other modules are still newer than the recipe, it says so at the end, so you run it again. Because it installs with `-Force` and does not ask you to confirm the repository, you first confirm with Microsoft Support that every registered repository (`Get-PSRepository`) is an approved source. |
 
 ## Overview
 
@@ -428,7 +428,10 @@ with the historical `4.0.2` example or interpret a validator upper bound as an
 exact pin. Like the helper, it installs from the registered PowerShell repository
 that has the recipe version, and it prints that repository's name; if no
 registered repository has that version, or more than one does, it stops before
-any change.
+any change. It installs with `-Force`, so it does not ask you to confirm a
+repository that is not trusted. Before you run it, list the registered
+repositories with `Get-PSRepository` and confirm with Microsoft Support that each
+one is an approved source; if one is not, do not run the block.
 
 This narrow fallback handles versioned, PowerShellGet-managed modules in the
 Windows PowerShell **AllUsers** directory only (`C:\Program Files\WindowsPowerShell\Modules`,
