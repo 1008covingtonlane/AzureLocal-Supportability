@@ -1,11 +1,14 @@
 {
   "schema": "tsg-forge-handoff/v1",
   "generator": {
-    "tool": "tsg-forge",
-    "module": "make_sidecar.py"
+    "tool": "sidecar",
+    "from": [
+      "article-markers",
+      "override"
+    ]
   },
   "source": {
-    "sha256": "47877ca735ee980e999e0c9447dc3f14d69a39607a12ed694756f8fc4461b199",
+    "sha256": "d8aa7f77e9abb87b20f2d8d846996053a18f5777359b20b65207634293dc9f99",
     "path": "TSG/EnvironmentValidator/Troubleshooting-Module-Versions.md"
   },
   "handoffs": [
@@ -15,10 +18,11 @@
       "binding": {
         "step": "S3",
         "section": "Mitigation Details > Step 3: Close the other programs that hold the files",
-        "line": 569,
+        "line": 635,
         "class": "operator-required",
         "needs": [],
-        "source_sha256": "43cde48e530981d6424cdd8899040434f43b1f50756de30754d48f984e2c4924"
+        "source_sha256": "deb5643fe589d363fabe396e1f8f4682f488f16292577d488853ac862aefb348",
+        "marker": "Stop here and confirm."
       },
       "reason": "A person must decide whether it is safe to end another program or sign its user out.",
       "article_reason": [
@@ -27,7 +31,7 @@
       "run_on": "off-node",
       "families": [],
       "instructions": {
-        "text": "Do this step only if Step 1 printed `OTHER_HOLDERS_FOUND`. For each process whose `NextStep` does not say `Step 2 stops it.`, do what its `NextStep` says. Contact the owner before you close anything of theirs. Never sign out session 0: it runs the Windows services and remote sessions."
+        "text": "The owner of each program that Step 1 listed, other than the PowerShell windows that Step 2 stops, confirms that it can be closed and closes it, or lets you close it. Then run Step 4, which prints `FILES_RELEASED` when no program holds the files."
       },
       "parameters": [],
       "verify": {
@@ -36,7 +40,7 @@
         "commands": [
           {
             "surface": "powershell",
-            "text": "& {\n    $moduleRoot = Join-Path $env:ProgramFiles 'WindowsPowerShell\\Modules\\AzStackHci.EnvironmentChecker'\n    $folders = @(Get-ChildItem -Path $moduleRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -as [version] } | ForEach-Object { $_.FullName }) +\n        @(Get-Module -Name 'AzStackHci.EnvironmentChecker' -ListAvailable | Where-Object { $_.Path -like \"*$($_.Version)*\" } | ForEach-Object { $_.ModuleBase })\n    $files = @($folders | Sort-Object -Unique |\n        ForEach-Object { Get-ChildItem -LiteralPath $_ -Recurse -File -Force -ErrorAction SilentlyContinue } |\n        ForEach-Object { $_.FullName } | Sort-Object -Unique)\n    $inUse = @()\n    $checkError = $null\n    foreach ($file in $files) {\n        try {\n            $stream = [System.IO.File]::Open($file, 'Open', 'ReadWrite', 'None')\n            $stream.Close()\n        }\n        catch [System.IO.IOException] { if (Test-Path -LiteralPath $file) { $inUse += $file } }\n        catch [System.UnauthorizedAccessException] { $inUse += $file }\n        catch { $checkError = $_.Exception.Message; break }\n    }\n    if ($checkError) {\n        Write-Output 'LOCK_CHECK_UNAVAILABLE'\n        Write-Output \"The check could not run in this PowerShell session: $checkError\"\n    }\n    elseif ($files.Count -eq 0) {\n        Write-Output 'NO_FILES_TO_CHECK'\n        Write-Output \"This machine has no files in the external copy's folders.\"\n    }\n    elseif ($inUse.Count -gt 0) {\n        Write-Output 'FILES_IN_USE'\n        $inUse | ForEach-Object { \"In use: $_\" }\n        Write-Output 'Run the Step 1 script again to see which processes hold these files.'\n    }\n    else {\n        Write-Output 'FILES_RELEASED'\n        Write-Output \"No file in the external copy's folders is in use ($($files.Count) files checked).\"\n    }\n}",
+            "text": "& {\n    $moduleRoot = Join-Path $env:ProgramFiles 'WindowsPowerShell\\Modules\\AzStackHci.EnvironmentChecker'\n    $folders = @(Get-ChildItem -Path $moduleRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -as [version] } | ForEach-Object { $_.FullName }) +\n        @(Get-Module -Name 'AzStackHci.EnvironmentChecker' -ListAvailable | Where-Object { $_.Path -like \"*$($_.Version)*\" } | ForEach-Object { $_.ModuleBase })\n    $files = @($folders | Sort-Object -Unique |\n        ForEach-Object { Get-ChildItem -LiteralPath $_ -Recurse -File -Force -ErrorAction SilentlyContinue } |\n        ForEach-Object { $_.FullName } | Sort-Object -Unique)\n    $inUse = @()\n    $checkError = $null\n    foreach ($file in $files) {\n        try {\n            $stream = [System.IO.File]::Open($file, 'Open', 'ReadWrite', 'None')\n            $stream.Close()\n        }\n        catch [System.IO.IOException] { if (Test-Path -LiteralPath $file) { $inUse += $file } }\n        catch { $checkError = \"Could not open ${file}: $($_.Exception.Message)\"; break }\n    }\n    if ($checkError) {\n        Write-Output 'LOCK_CHECK_UNAVAILABLE'\n        Write-Output $checkError\n    }\n    elseif ($files.Count -eq 0) {\n        Write-Output 'NO_FILES_TO_CHECK'\n        Write-Output \"This machine has no files in the external copy's folders.\"\n    }\n    elseif ($inUse.Count -gt 0) {\n        Write-Output 'FILES_IN_USE'\n        $inUse | ForEach-Object { \"In use: $_\" }\n        Write-Output 'Run the Step 1 script again to see which processes hold these files.'\n    }\n    else {\n        Write-Output 'FILES_RELEASED'\n        Write-Output \"No file in the external copy's folders is in use ($($files.Count) files checked).\"\n    }\n}",
             "read_only": true,
             "handles_secret": false,
             "run_on": "node",
@@ -48,9 +52,9 @@
             ],
             "source": {
               "section": "Mitigation Details > Step 4: Confirm that the files are released",
-              "line": 578,
+              "line": 644,
               "kind": "code",
-              "sha256": "9b8edd2baed6740d93e4e3532d50ae6e8901389ab2bbd0abea70c263f2d4f152"
+              "sha256": "656dc01a8055b39e811abcd49435564756b76e9d51e056dc413af3a688e8f4e1"
             }
           }
         ]
