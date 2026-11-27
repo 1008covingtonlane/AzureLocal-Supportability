@@ -21,10 +21,10 @@ Sample output:
 ```
 Name                                         OwnerNode State
 ----                                         --------- -----
-Azure Stack HCI Update Service Cluster Group v-Host1   Online
+Azure Stack HCI Update Service Cluster Group Node01    Online
 ```
 
-The service that enforces the update service memory limit writes these events. Before the 2701 release it is the Agent Lifecycle Agent (ALM), and its events use the provider name `AzureStack Agent Lifecycle Agent`. From the 2701 release, the Resource Governor Agent (`AzureStack Resource Governor Agent`) replaces ALM's watchdog, and its events use the provider name `ResourceGovernorAgent`. Both write to the Application log.
+The service that enforces the update service memory limit writes these events to the Application log, with event ID 1 and level Error. On older releases it is the Agent Lifecycle Agent (ALM), and its events use the provider name `AzureStack Agent Lifecycle Agent`. On newer releases, including 2701, the Resource Governor Agent (`AzureStack Resource Governor Agent`) writes them, and its events use the provider name `ResourceGovernorAgent`. The message text is the same for both.
 
 Run the following commands to find events indicating that the update service was terminated due to exceeding the memory limit. The command checks both provider names, so it works on every release:
 
@@ -32,7 +32,7 @@ Run the following commands to find events indicating that the update service was
 Get-WinEvent -LogName Application | where { $_.ProviderName -in @("AzureStack Agent Lifecycle Agent", "ResourceGovernorAgent") } | where Message -match "Azure Stack HCI Update Service: Memory Error Limit Reached"
 ```
 
-Sample output from a release before 2701 (from 2701, `ProviderName` is `ResourceGovernorAgent`). Note the `TimeCreated` value to determine that these are recent, relevant events. If the event times are not recent they are likely not relevant:
+Sample output from an older release (on newer releases, `ProviderName` is `ResourceGovernorAgent`). Note the `TimeCreated` value to determine that these are recent, relevant events. If the event times are not recent they are likely not relevant:
 ```
    ProviderName: AzureStack Agent Lifecycle Agent
 
@@ -139,7 +139,7 @@ If the problem is still occurring, the final thing to do is to temporarily incre
 
 This can be done by changing the configured value for the memory limit in the update service agent manifest on each node and restarting the ALM agent. To do so, set the expected values at the top of this script in MB (existing suggested values are warning: 5.5GB and error: 6GB) and run this script **on every cluster node**.
 
-From the 2701 release there is no ALM agent and no `C:\Agents\AgentManifests` folder. The Resource Governor Agent reads the update service limits from `AgentManifest.json` in the update service package folder under `C:\NugetStore`, and those limits already are the suggested values (warning 5632 MB, error 6144 MB). On these releases the script reads that file on each node and changes nothing: it reports the limits, or stops if they are lower than the values at the top of the script. Don't edit files in `C:\NugetStore`; if the limits are lower, contact Microsoft Support.
+From the 2701 release there is no ALM agent and no `C:\Agents\AgentManifests` folder; the Resource Governor Agent enforces the limit. The update service limits appear in two files on each node: the update service's registration file, `Azure Stack HCI Update Service.json` in `C:\ProgramData\Microsoft\AzureStack\ResourceGovernance`, and `AgentManifest.json` in the update service package folder under `C:\NugetStore`. On 2701 both files hold the suggested values (warning 5632 MB, error 6144 MB). On these releases the script reads both files on each node and changes nothing: it reports the limits in each file, or stops if a file holds lower values than those at the top of the script. Don't edit either file; if the limits are lower, contact Microsoft Support.
 
 > [!NOTE]
 > On releases before 2701, the maximum value allowed by ALM resource governance is **8GB (8192 MB)**. If the configured error limit exceeds this, the next Solution update will fail at patching the update service. If the error limit is configured higher than 8GB temporarily, it must be reset down to 8192 or lower before taking the next Solution update.
@@ -167,28 +167,44 @@ Invoke-Command -ComputerName $nodes -ScriptBlock {
 
     if (-not (Test-Path "C:\Agents\AgentManifests"))
     {
-        # 2701 and later: no ALM. Read the limits the Resource Governor Agent uses from the update service package.
+        # 2701 and later: no ALM. Report the limits from both files that hold them, and change nothing.
+        $limitFiles = @(Join-Path $env:ProgramData "Microsoft\AzureStack\ResourceGovernance\Azure Stack HCI Update Service.json")
         $updateService = Get-CimInstance -ClassName Win32_Service -Filter "Name='Azure Stack HCI Update Service'"
-        if (-not $updateService -or $updateService.PathName -notmatch '^"?([^"]+\.exe)')
+        if ($updateService -and $updateService.PathName -match '^"?([^"]+\.exe)')
         {
-            throw "[$($env:ComputerName)] Unable to find the Azure Stack HCI Update Service on this node"
-        }
-        $packageManifest = Join-Path (Split-Path $Matches[1] -Parent) "AgentManifest.json"
-        if (-not (Test-Path $packageManifest))
-        {
-            throw "[$($env:ComputerName)] Unable to find the update service agent manifest at $packageManifest"
-        }
-        $limits = @{}
-        Select-String -Path $packageManifest -Pattern '"(WarningMemoryLimitMB|ErrorMemoryLimitMB)"\s*:\s*(\d+)' |
-            ForEach-Object { $limits[$_.Matches[0].Groups[1].Value] = [int]$_.Matches[0].Groups[2].Value }
-        if ($limits["WarningMemoryLimitMB"] -ge $memoryWarningLimit -and $limits["ErrorMemoryLimitMB"] -ge $memoryErrorLimit)
-        {
-            Write-Host "[$($env:ComputerName)] No changes needed. $packageManifest sets Warning limit $($limits["WarningMemoryLimitMB"])MB and Error limit $($limits["ErrorMemoryLimitMB"])MB"
+            $limitFiles += Join-Path (Split-Path $Matches[1] -Parent) "AgentManifest.json"
         }
         else
         {
-            throw "[$($env:ComputerName)] $packageManifest sets Warning limit $($limits["WarningMemoryLimitMB"])MB and Error limit $($limits["ErrorMemoryLimitMB"])MB, lower than the suggested values. Don't edit this file; contact Microsoft Support."
+            Write-Host "[$($env:ComputerName)] The Azure Stack HCI Update Service is not installed on this node, so its AgentManifest.json is not checked"
         }
+        $foundFiles = @($limitFiles | Where-Object { Test-Path -LiteralPath $_ })
+        if ($foundFiles.Count -eq 0)
+        {
+            throw "[$($env:ComputerName)] Unable to find the update service memory limits at $($limitFiles -join ' or ')"
+        }
+        $lowerLimits = $false
+        foreach ($limitFile in $limitFiles)
+        {
+            if ($foundFiles -notcontains $limitFile)
+            {
+                Write-Host "[$($env:ComputerName)] Not found: $limitFile"
+                continue
+            }
+            $limits = @{}
+            Select-String -LiteralPath $limitFile -Pattern '"(WarningMemoryLimitMB|ErrorMemoryLimitMB)"\s*:\s*(\d+)' -AllMatches |
+                ForEach-Object { $_.Matches } | ForEach-Object { $limits[$_.Groups[1].Value] = [int]$_.Groups[2].Value }
+            Write-Host "[$($env:ComputerName)] $limitFile sets Warning limit $($limits["WarningMemoryLimitMB"])MB and Error limit $($limits["ErrorMemoryLimitMB"])MB"
+            if (-not ($limits["WarningMemoryLimitMB"] -ge $memoryWarningLimit -and $limits["ErrorMemoryLimitMB"] -ge $memoryErrorLimit))
+            {
+                $lowerLimits = $true
+            }
+        }
+        if ($lowerLimits)
+        {
+            throw "[$($env:ComputerName)] The update service memory limits are lower than the suggested values. Don't edit these files; contact Microsoft Support."
+        }
+        Write-Host "[$($env:ComputerName)] No changes needed. The limits are at least the suggested values."
         return
     }
 
