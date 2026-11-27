@@ -1,5 +1,5 @@
 # Symptoms    
-When updating your Azure Local instance to 2506 release, you encounter one of the following errors:
+When updating your Azure Local instance to the 2505 release, you encounter one of the following errors:
 
 ```
 Could not update IgvmAgent on physical node Exception: Unable to create a new version folder with in 10 tries.
@@ -21,11 +21,21 @@ This occurs because there is an underlying issue with removing certain folders. 
 For customers updating their Azure Local instance to 2505 release, if you encounter any of the above errors, perform the following steps to resolve the issue:
 
 1. [Required] Restart Azure Local instance (all the machines in your Azure Local instance).
+
+   **Changes:** Restarts every machine in the instance. Nothing is installed or removed by the restart itself.
+
+   **Plan for:** Workloads on each machine stop or move while that machine restarts, so schedule the restart in a maintenance window.
+
 2. [Optional] Run IGVM Agent update plan.
+
+   **Changes:** Starts the IGVM Agent deployment action plan on the instance. It does not resume the solution update; step 3 does that.
+
    - Log in into one of the nodes instances and open a Powershell admin console.
    - Create an ECE Cluster service by running: ```$ececlient = Create-EceClusterServiceClient```
    - Run update action plan for IGVM Agent by running: ```$guid = Invoke-ActionPlanInstance -RolePath IgvmAgentDeployment -ActionType DeployIgvmAgent -EceClient:$ececlient```
    - Monitor the action plan until it succeeds by running: ```Start-MonitoringActionplanInstanceToComplete $guid```
 3. [Required] Resume Azure Local update (repeat steps to update your Azure Local instance).
+
+   **Changes:** Resumes the solution update, which continues installing the update on every machine in the instance.
 
 Alternately, you can skip 2505 and directly update your Azure Local instance to 2506 release or above to resolve the issue.
