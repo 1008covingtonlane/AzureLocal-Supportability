@@ -46,18 +46,21 @@ Run this block in a new elevated Windows PowerShell 5.1 session on each node. It
     }
     @($rows) | Sort-Object Name, Version | Format-Table -AutoSize | Out-String -Width 300 | Write-Output
     $reasons = @(@($rows) | Where-Object { $_.Finding -eq 'Newer than recipe' } | ForEach-Object { "$($_.Name) $($_.Version) is newer than the recipe version $($_.RecipeVersion)" })
-    if (-not @(@($rows) | Where-Object { $_.Name -eq 'Az.Accounts' -and $_.Finding -eq 'Recipe version' }).Count) {
-        $reasons += "the recipe version of Az.Accounts ($($recipe['Az.Accounts'])) is not installed"
+    # The update runs under service accounts, which do not see a copy in this administrator's Documents folder.
+    $allUsersRoot = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules'
+    if (-not @(@($rows) | Where-Object { $_.Name -eq 'Az.Accounts' -and $_.Finding -eq 'Recipe version' -and
+                $_.Path -eq (Join-Path (Join-Path $allUsersRoot 'Az.Accounts') ([string]$_.Version)) }).Count) {
+        $reasons += "the recipe version of Az.Accounts ($($recipe['Az.Accounts'])) is not installed for all users in $allUsersRoot"
     }
     if ($reasons.Count) { Write-Output ('RESULT: AFFECTED - ' + ($reasons -join '; ')) }
-    else { Write-Output "RESULT: NOT AFFECTED - the recipe version of Az.Accounts ($($recipe['Az.Accounts'])) is installed and no version newer than the recipe is installed." }
+    else { Write-Output "RESULT: NOT AFFECTED - the recipe version of Az.Accounts ($($recipe['Az.Accounts'])) is installed for all users and no version newer than the recipe is installed." }
 }
 ```
 
 | Result | Meaning | Next step |
 | --- | --- | --- |
-| `RESULT: AFFECTED` | The line names the module versions that do not match the recipe on this node. | Follow [Mitigation Details](#mitigation-details) on this node. |
-| `RESULT: NOT AFFECTED` | The versions of these three modules match the recipe on this node. Older versions do not cause this issue and do not need to be removed. | None on this node. If no node is affected and the update still fails with an error above, contact Microsoft support. |
+| `RESULT: AFFECTED` | The line names the module versions that are newer than the recipe on this node, or says that the recipe version of `Az.Accounts` is not installed for all users. | Follow [Mitigation Details](#mitigation-details) on this node. |
+| `RESULT: NOT AFFECTED` | The recipe version of `Az.Accounts` is installed for all users in `C:\Program Files\WindowsPowerShell\Modules`, and no version of these three modules is newer than the recipe on this node. Older versions do not cause this issue and do not need to be removed. | None on this node. If no node is affected and the update still fails with an error above, contact Microsoft support. |
 | `RESULT: UNKNOWN` | The required versions could not be read on this node. | Do not change modules on this node. Contact Microsoft support with the output. |
 
 # Where this failure appears
@@ -108,7 +111,7 @@ The block stops before changing anything, and prints `No changes were made`, whe
 - It is not running in an elevated Windows PowerShell 5.1 session, or an Azure PowerShell module is already loaded in the session.
 - The validated recipe cannot be read, does not list `Az.Accounts`, or lists an invalid or duplicated version.
 - A copy of `Az.Accounts`, or a copy that would be removed, is outside `C:\Program Files\WindowsPowerShell\Modules` or was not installed with `Install-Module`. Do not delete such a copy by hand; contact Microsoft support.
-- Another installed module in this session's module path still needs a version that would be removed, or loads a file from one. The block lists the installed modules in a separate PowerShell process, so nothing is loaded into this session, and reads each module manifest. It stops when a `RequiredModules`, `ModuleList`, or `NestedModules` entry needs an exact version (`RequiredVersion`) that would be removed, or a minimum (`ModuleVersion`) or maximum (`MaximumVersion`, including a wildcard such as `5.*`) version that no remaining version in `C:\Program Files\WindowsPowerShell\Modules` meets, or when a manifest that needs one of these modules cannot be read. It also stops when an entry in `RootModule` (`ModuleToProcess`), `NestedModules`, `RequiredAssemblies`, `ScriptsToProcess`, `TypesToProcess`, `FormatsToProcess`, `FileList`, `RequiredModules`, or `ModuleList`, including the `ModuleName` of a module specification, resolves from the manifest's folder into a version folder that would be removed, whatever name the path contains (for example `..\5.5.4\Accounts.psm1`), or is a path that leads out of the manifest's folder and cannot be resolved. A module's own files that its manifest lists by path, such as `ConnectedMachine.Autorest/Az.ConnectedMachine.psm1` in `Az.ConnectedMachine`, do not stop the block. It does not check modules in other users' `Documents` folders, or a module that enforces a version only inside its own script. `Uninstall-Module` is run with `-Force` because without it PowerShellGet refuses to remove any version that another module names as a dependency, whatever version that module needs; this check replaces that refusal with a version check.
+- Another installed module still needs a version that would be removed, or loads a file from one. This covers the modules in this session's module path and in the `Documents\WindowsPowerShell\Modules` folder of every profile under `C:\Users` and of the SYSTEM profile; a module in a user's folder can also use the versions in that same folder. The manifests in users' folders are read as data and never loaded, so code in them does not run. If one of these folders cannot be read, the block stops. The block lists the installed modules in a separate PowerShell process, so nothing is loaded into this session, and reads each module manifest. It stops when a `RequiredModules`, `ModuleList`, or `NestedModules` entry needs an exact version (`RequiredVersion`) that would be removed, or a minimum (`ModuleVersion`) or maximum (`MaximumVersion`, including a wildcard such as `5.*`) version that no remaining version in `C:\Program Files\WindowsPowerShell\Modules` meets, or when a manifest that needs one of these modules cannot be read. It also stops when an entry in `RootModule` (`ModuleToProcess`), `NestedModules`, `RequiredAssemblies`, `ScriptsToProcess`, `TypesToProcess`, `FormatsToProcess`, `FileList`, `RequiredModules`, or `ModuleList`, including the `ModuleName` of a module specification, resolves from the manifest's folder into a version folder that would be removed, whatever name the path contains (for example `..\5.5.4\Accounts.psm1`), or is a path that leads out of the manifest's folder and cannot be resolved, or is set by a variable other than an environment variable, or names a module through any variable, or is built by a command such as `Join-Path`. The condition of an `if` in a manifest, such as `$PSEdition -eq 'Desktop'`, does not stop the block. A module's own files that its manifest lists by path, such as `ConnectedMachine.Autorest/Az.ConnectedMachine.psm1` in `Az.ConnectedMachine` or `Helpers/Helper.psm1` in another module, do not stop the block. It does not check a `Documents` folder that is redirected outside the profile, or a module that enforces a version only inside its own script. `Uninstall-Module` is run with `-Force` because without it PowerShellGet refuses to remove any version that another module names as a dependency, whatever version that module needs; this check replaces that refusal with a version check.
 - A version that needs to be installed, or a version that would be removed, is not available in the repository in `$Repository`, so it could not be installed or restored from there.
 
 After it installs a version, the block reads the installed modules again and repeats the same checks, because `Install-Module` can also install a newer `Az.Accounts` as a dependency. If a check fails at that point, it stops with `The installed versions were kept and no versions were removed`. It prints `RESULT: CHANGED` only after it confirms that the recipe version of `Az.Accounts` is installed for all users and that no version newer than the recipe remains.
@@ -161,12 +164,53 @@ Leave `$Repository` set to `'PSGallery'` unless your organization requires an ap
     $full = { param([version]$v) [version]::new($v.Major, $v.Minor, [math]::Max($v.Build, 0), [math]::Max($v.Revision, 0)) }
     $allUsersRoot = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules'
     $isAllUsers = { param($m) $m.ModuleBase -eq (Join-Path (Join-Path $allUsersRoot $m.Name) ([string]$m.Version)) }
+    function Get-UserModuleRoot {
+        # The Documents module folder of every profile under C:\Users and of the SYSTEM profile. A module there can need a
+        # version that would be removed. Each folder on the way is listed, so a folder that cannot be read stops the block
+        # instead of looking empty. A Documents folder that is redirected outside the profile is not checked.
+        param([string]$Outcome)
+        try {
+            $profiles = @(@(Get-ChildItem -LiteralPath (Join-Path $env:SystemDrive 'Users') -Directory -Force -ErrorAction Stop |
+                        Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | ForEach-Object { $_.FullName }) +
+                (Join-Path $env:SystemRoot 'System32\config\systemprofile'))
+            foreach ($p in $profiles) {
+                $dir = $p
+                foreach ($part in 'Documents', 'WindowsPowerShell', 'Modules') {
+                    $next = @(Get-ChildItem -LiteralPath $dir -Directory -Force -ErrorAction Stop | Where-Object { $_.Name -eq $part })
+                    if (-not $next.Count) { $dir = $null; break }
+                    $dir = $next[0].FullName
+                }
+                if ($dir) { Get-ChildItem -LiteralPath $dir -Force -ErrorAction Stop | Out-Null; $dir }
+            }
+        } catch {
+            throw "A user's module folder could not be read, so the modules in it cannot be checked: $($_.Exception.Message) Contact Microsoft support. $Outcome"
+        }
+    }
     function Get-DependentCandidate {
         # Modules in this session's module path. Windows PowerShell 5.1 can import a module that another module's
         # NestedModules entry names with a version while it lists modules, and keep its files locked by that process.
         # So the modules are listed in a separate PowerShell process (a job), which returns only plain values, and
         # nothing is loaded into this session. The job must finish and end with $end; if it does not, the block stops.
-        param([string]$Outcome)
+        # Users can write to the folders in $UserRoot, so Get-Module, which can run code from them, is not used there: their
+        # manifests (Name\Name.psd1 and Name\<version>\Name.psd1) are found and read as data only. A folder that cannot be read stops the block.
+        param([string]$Outcome, [string[]]$UserRoot = @())
+        $fromFiles = @()
+        try {
+            $fromFiles = @(foreach ($root in $UserRoot) {
+                foreach ($nameDir in @(Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction Stop)) {
+                    $dirs = @($nameDir) + @(Get-ChildItem -LiteralPath $nameDir.FullName -Directory -Force -ErrorAction Stop | Where-Object { $_.Name -as [version] })
+                    foreach ($f in @($dirs | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Filter ($nameDir.Name + '.psd1') -File -Force -ErrorAction Stop })) {
+                        $data = $null
+                        try { $data = Import-PowerShellDataFile -LiteralPath $f.FullName -ErrorAction Stop } catch { $data = $null }
+                        $specName = { param($e) if ($e -is [hashtable]) { [string]$e.ModuleName } else { [string]$e } }
+                        $version = $(if ($data -and ([string]$data.ModuleVersion -as [version])) { [string]$data.ModuleVersion } else { Split-Path -Leaf $f.DirectoryName })
+                        [pscustomobject]@{ Name = $nameDir.Name; Version = $version; Path = $f.FullName; ModuleBase = $f.DirectoryName
+                            Guid = $(if ($data) { [string]$data.GUID }); RequiredModules = @(if ($data) { @($data.RequiredModules) | Where-Object { $_ } | ForEach-Object { & $specName $_ } })
+                            ModuleList = @(if ($data) { @($data.ModuleList) | Where-Object { $_ } | ForEach-Object { & $specName $_ } }) }
+                    }
+                }
+            })
+        } catch { throw "A user's module folder could not be read: $($_.Exception.Message) Contact Microsoft support. $Outcome" }
         $end = 'End of the module list.'
         $job = $null
         $listed = @()
@@ -187,7 +231,7 @@ Leave `$Repository` set to `'PSGallery'` unless your organization requires an ap
         if (-not $job -or $job.State -ne 'Completed' -or $listed.Count -lt 2 -or $listed[-1] -ne $end) {
             throw "The installed modules could not be listed in a separate PowerShell process. Contact Microsoft support. $Outcome"
         }
-        @($listed[0..($listed.Count - 2)] | ForEach-Object {
+        @(@($listed[0..($listed.Count - 2)]) + $fromFiles | ForEach-Object {
                 [pscustomobject]@{ Name = $_.Name; Version = $_.Version -as [version]; Path = $_.Path; ModuleBase = $_.ModuleBase; Guid = $_.Guid -as [guid]
                     RequiredModules = @($_.RequiredModules | ForEach-Object { [pscustomobject]@{ Name = $_ } })
                     ModuleList = @($_.ModuleList | ForEach-Object { [pscustomobject]@{ Name = $_ } }) }
@@ -201,9 +245,12 @@ Leave `$Repository` set to `'PSGallery'` unless your organization requires an ap
         # the module are read; a NestedModules entry that gives only the name needs no particular version. A requirement
         # that cannot be read is reported as unmet.
         # ExcludePath lists the module folders that are removed in the same change, so they need nothing.
-        param([string]$ModuleName, [version[]]$KeptVersion, [object[]]$Modules, [string[]]$ExcludePath = @())
+        # A module in a user's folder (UserRoot) also finds the versions in that same folder, which are not removed.
+        param([string]$ModuleName, [version[]]$KeptVersion, [object[]]$Modules, [string[]]$ExcludePath = @(), [string[]]$UserRoot = @())
         foreach ($d in $Modules) {
             if ($d.Name -eq $ModuleName -or $ExcludePath -contains $d.ModuleBase) { continue }
+            $ownRoot = @($UserRoot | Where-Object { ([string]$d.ModuleBase).StartsWith($_ + '\', [StringComparison]::OrdinalIgnoreCase) })[0]
+            $own = @(if ($ownRoot) { $Modules | Where-Object { $_.Name -eq $ModuleName -and ([string]$_.ModuleBase).StartsWith($ownRoot + '\', [StringComparison]::OrdinalIgnoreCase) } })
             # An entry given as a path names the module by its folder or file name; it is read too, so that the path check stops on it.
             $pathPattern = "(^|[\\/])$([regex]::Escape($ModuleName))([\\/]|\.(psd1|psm1|dll)$|$)"
             $listed = @(@($d.RequiredModules) + @($d.ModuleList) | Where-Object { $_ -and ($_.Name -eq $ModuleName -or
@@ -232,18 +279,27 @@ Leave `$Repository` set to `'PSGallery'` unless your organization requires an ap
                 $nestedEntries = @(@($data.NestedModules) | Where-Object { $_ -and ([Microsoft.PowerShell.Commands.ModuleSpecification]::new($_)).Name -eq $ModuleName })
                 foreach ($entry in @(@(@($data.RequiredModules) + @($data.ModuleList) | Where-Object { $_ }) + $nestedEntries)) {
                     $s = [Microsoft.PowerShell.Commands.ModuleSpecification]::new($entry)
-                    # A requirement given as a path to a module file or folder can pin any version, so it is not checked here.
-                    if ($s.Name -match '[\\/]|\.(psd1|psm1|dll)$') { throw "A module is required by a file path: $($s.Name)" }
+                    if ($s.Name -match '[\\/]|\.(psd1|psm1|dll)$') {
+                        # A relative path that stays in the module's own folder, such as Helpers/Helper.psm1, loads that module's own
+                        # file. It is skipped when the file is there or the path does not name $ModuleName. Any other path can pin
+                        # any version, so it is not checked here; Get-RemovedFileReference reports one that enters a removed folder.
+                        if ($s.Name -notmatch '\.\.|[%$~]|^\s*([\\/]|[A-Za-z]:)' -and
+                            ((Test-Path -LiteralPath (Join-Path $d.ModuleBase $s.Name)) -or $s.Name -notmatch $pathPattern)) {
+                            if ($s.Name -match $pathPattern) { $named = $true }
+                            continue
+                        }
+                        throw "A module is required by a file path: $($s.Name)"
+                    }
                     if ($s.Name -ne $ModuleName) { continue }
                     $named = $true
-                    # A GUID in the requirement is met only by a kept version whose remaining all-users copy has that GUID.
-                    # A copy in a user's folder, or a version that is not installed yet, does not show the GUID of that copy.
-                    $candidates = $KeptVersion
+                    # A GUID in the requirement is met only by a kept version whose remaining all-users copy has that GUID, or by a
+                    # copy with that GUID in the module's own user folder. A version that is not installed yet does not show its GUID.
+                    $candidates = @(@($KeptVersion) + @($own | ForEach-Object { $_.Version }))
                     if ($s.Guid) {
                         $sharedRoot = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules'
                         $guidVersions = @($Modules | Where-Object { $_.Name -eq $ModuleName -and $_.Guid -eq $s.Guid -and $ExcludePath -notcontains $_.ModuleBase -and
                                 (Split-Path -Parent (Split-Path -Parent $_.ModuleBase)) -eq $sharedRoot } | ForEach-Object { $_.Version })
-                        $candidates = @($KeptVersion | Where-Object { $guidVersions -contains $_ })
+                        $candidates = @(@($KeptVersion | Where-Object { $guidVersions -contains $_ }) + @($own | Where-Object { $_.Guid -eq $s.Guid } | ForEach-Object { $_.Version }))
                     }
                     if ($s.RequiredVersion) {
                         $ok = $candidates -contains $s.RequiredVersion
@@ -303,18 +359,30 @@ Leave `$Repository` set to `'PSGallery'` unless your organization requires an ap
                         'TypesToProcess', 'FormatsToProcess', 'FileList', 'RequiredModules', 'ModuleList'
                     foreach ($pair in $table.KeyValuePairs) {
                         $key = [string]$pair.Item1.Value
-                        # A file field whose value is built by an expression (joined strings, -f, a method call, or a
-                        # string that embeds anything other than $env:NAME) cannot be resolved without running it, so it stops the block.
-                        if ($fileKeys -contains $key -and @($pair.Item2.FindAll({ param($n)
+                        # The condition of an if, such as $PSEdition -eq 'Desktop', chooses a branch and is not a path, so it is skipped.
+                        $conds = @($pair.Item2.FindAll({ param($n) $n -is [Management.Automation.Language.IfStatementAst] }, $true) | ForEach-Object { $_.Clauses | ForEach-Object { $_.Item1 } })
+                        $nodes = @($pair.Item2.FindAll({ $true }, $true) | Where-Object { $n = $_
+                                -not @($conds | Where-Object { $_.Extent.StartOffset -le $n.Extent.StartOffset -and $n.Extent.EndOffset -le $_.Extent.EndOffset }).Count })
+                        $isSpecKey = 'NestedModules', 'RequiredModules', 'ModuleList' -contains $key
+                        # A file field whose value is built by an expression (a command such as Join-Path, joined strings, -f, a method call, a variable other than
+                        # $env:NAME, or a string that embeds anything other than $env:NAME) cannot be resolved without running it, so it
+                        # stops the block. In a module entry any variable stops it, because it can also name the module that is required.
+                        if ($fileKeys -contains $key -and @($nodes | Where-Object { $n = $_
                                     ($n -is [Management.Automation.Language.BinaryExpressionAst] -and $n.Operator -in 'Plus', 'Format', 'Join') -or
                                     $n -is [Management.Automation.Language.InvokeMemberExpressionAst] -or $n -is [Management.Automation.Language.SubExpressionAst] -or
+                                    $n -is [Management.Automation.Language.CommandAst] -or
+                                    ($n -is [Management.Automation.Language.VariableExpressionAst] -and ($isSpecKey -or ($n.VariablePath.DriveName -ne 'env' -and
+                                        $n.Parent -isnot [Management.Automation.Language.ExpandableStringExpressionAst]))) -or
                                     ($n -is [Management.Automation.Language.ExpandableStringExpressionAst] -and @($n.NestedExpressions | Where-Object {
-                                            -not ($_ -is [Management.Automation.Language.VariableExpressionAst] -and $_.VariablePath.DriveName -eq 'env') }).Count -gt 0) }, $true)).Count -gt 0) {
+                                            -not ($_ -is [Management.Automation.Language.VariableExpressionAst] -and $_.VariablePath.DriveName -eq 'env') }).Count -gt 0) }).Count -gt 0) {
                             $data[$key] = @('$computed-path')
                             continue
                         }
-                        $data[$key] = @($pair.Item2.FindAll({ param($n) $n -is [Management.Automation.Language.StringConstantExpressionAst] -or
-                                $n -is [Management.Automation.Language.ExpandableStringExpressionAst] }, $true) | ForEach-Object { $_.Value })
+                        # A value given as a bare variable, such as RootModule = $env:MODULE_IMPL, is read as $env:NAME and resolved below.
+                        $data[$key] = @($nodes | Where-Object { $n = $_; $n -is [Management.Automation.Language.StringConstantExpressionAst] -or
+                                $n -is [Management.Automation.Language.ExpandableStringExpressionAst] -or ($n -is [Management.Automation.Language.VariableExpressionAst] -and
+                                    $n.Parent -isnot [Management.Automation.Language.ExpandableStringExpressionAst]) } | ForEach-Object {
+                                if ($_ -is [Management.Automation.Language.VariableExpressionAst]) { '$' + $_.VariablePath.UserPath } else { $_.Value } })
                     }
                 }
             } catch {
@@ -373,11 +441,12 @@ Leave `$Repository` set to `'PSGallery'` unless your organization requires an ap
         $removeBases = @($remove | ForEach-Object { $_.ModuleBase })
         $removeNames = @($remove | ForEach-Object { $_.Name } | Sort-Object -Unique)
         if ($removeNames.Count) {
-            $modules = @(Get-DependentCandidate -Outcome $Outcome)
+            $userRoots = @(Get-UserModuleRoot -Outcome $Outcome)
+            $modules = @(Get-DependentCandidate -Outcome $Outcome -UserRoot $userRoots)
             $broken = @(@(foreach ($n in $removeNames) {
                     $kept = @(@($available | Where-Object { $_.Name -eq $n -and (& $isAllUsers $_) -and $removeBases -notcontains $_.ModuleBase } | ForEach-Object { [version]$_.Version }) +
                         @($install | Where-Object { $_.Name -eq $n } | ForEach-Object { [version]$_.Version }))
-                    Get-UnmetDependent -ModuleName $n -KeptVersion $kept -Modules $modules -ExcludePath $removeBases | ForEach-Object { "$($_.Name) $($_.Version) needs $($_.Needs)" }
+                    Get-UnmetDependent -ModuleName $n -KeptVersion $kept -Modules $modules -ExcludePath $removeBases -UserRoot $userRoots | ForEach-Object { "$($_.Name) $($_.Version) needs $($_.Needs)" }
                 }) + @(Get-RemovedFileReference -Modules $modules -ExcludePath $removeBases | ForEach-Object { "$($_.Name) $($_.Version) loads $($_.Reference)" }))
             if ($broken.Count) {
                 throw ('Removing the newer versions would break these modules: ' + ($broken -join '; ') + ". Contact Microsoft support. $Outcome")
@@ -420,15 +489,21 @@ Leave `$Repository` set to `'PSGallery'` unless your organization requires an ap
         throw ('These recipe versions are still not installed for all users: ' + (($plan.Install | ForEach-Object { "$($_.Name) $($_.Version)" }) -join ', ') + ". Contact Microsoft support. $kept")
     }
     $removed = @()
+    $current = $null
     try {
         foreach ($r in @($plan.Remove | Sort-Object { $_.Name -eq 'Az.Accounts' }, Name, Version)) {
             Write-Output "REMOVING: $($r.Name) $($r.Version) at $($r.ModuleBase)"
+            $current = "$($r.Name) $($r.Version)"
             Uninstall-Module -Name $r.Name -RequiredVersion ([string]$r.Version) -Force
-            $removed += "$($r.Name) $($r.Version)"
+            $removed += $current
+            $current = $null
         }
     } catch {
+        # A failed uninstall can leave part of that version's files, so that version is restored too.
+        $restore = @($removed) + @($current | Where-Object { $_ })
         throw ("Uninstall-Module failed: $($_.Exception.Message) Removed: " + $(if ($removed.Count) { $removed -join ', ' } else { 'none' }) +
-            '. Do not retry the update. Restore the removed versions with Rollback and contact Microsoft support.')
+            $(if ($current) { "; partly removed: $current" } else { '' }) + '. Restore: ' + $(if ($restore.Count) { $restore -join ', ' } else { 'none' }) +
+            '. Do not retry the update. Restore each version listed after Restore with Rollback and contact Microsoft support.')
     }
 
     $now = @(Get-Module -ListAvailable -Name $names)
@@ -438,13 +513,14 @@ Leave `$Repository` set to `'PSGallery'` unless your organization requires an ap
     }
     if ($problems.Count) {
         throw ('Post-change check failed: ' + ($problems -join '; ') + '. Installed: ' + $(if ($installed.Count) { $installed -join ', ' } else { 'none' }) +
-            '; removed: ' + $(if ($removed.Count) { $removed -join ', ' } else { 'none' }) + '. Do not retry the update; keep this output and contact Microsoft support.')
+            '; removed: ' + $(if ($removed.Count) { $removed -join ', ' } else { 'none' }) + '. Restore: ' + $(if ($removed.Count) { $removed -join ', ' } else { 'none' }) +
+            '. Do not retry the update; keep this output, restore each version listed after Restore with Rollback, and contact Microsoft support.')
     }
     Write-Output "RESULT: CHANGED - the recipe versions are installed and no newer version remains. Close this window; the change takes effect only in new PowerShell sessions."
 }
 ```
 
-Expected result: `RESULT: CHANGED` or `RESULT: NO CHANGE NEEDED`. Any other ending is a stop: keep the output and do not run individual commands from the block by hand. If it stopped after an `INSTALLING:` line with `The installed versions were kept and no versions were removed`, keep those versions; they are the versions that the recipe requires. If it stopped after a `REMOVING:` line, restore the versions that the message lists with [Rollback](#rollback), and contact Microsoft support.
+Expected result: `RESULT: CHANGED` or `RESULT: NO CHANGE NEEDED`. Any other ending is a stop: keep the output and do not run individual commands from the block by hand. If it stopped after an `INSTALLING:` line with `The installed versions were kept and no versions were removed`, keep those versions; they are the versions that the recipe requires. If it stopped after a `REMOVING:` line, restore each version that the message lists after `Restore:` with [Rollback](#rollback), including a version that was only partly removed, and contact Microsoft support.
 
 ## Step 2: Verify the fix and resume the update
 
@@ -454,7 +530,7 @@ Expected result: `RESULT: CHANGED` or `RESULT: NO CHANGE NEEDED`. Any other endi
 
 Use this block in one of two cases:
 
-- **Step 1 stopped after a `REMOVING:` line.** Leave the update stopped. Restore each version that the message lists as removed, then contact Microsoft support. Do not resume the update.
+- **Step 1 stopped after a `REMOVING:` line.** Leave the update stopped. Restore each version that the message lists after `Restore:`, then contact Microsoft support. Do not resume the update.
 - **The update completed, and you need a version that Step 1 removed for other work.** This is optional. A restored version that is newer than the recipe can bring this error back, so run [Issue Validation](#issue-validation) before the next update.
 
 Take the name and version from the `REMOVING:` line, put them in the block below, and run it in an elevated Windows PowerShell 5.1 session on the same node. Set `$Repository` to the same repository that you used in Step 1. The block first confirms with `Find-Module` that this exact version is available in that repository; if it is not, it stops without installing anything.
