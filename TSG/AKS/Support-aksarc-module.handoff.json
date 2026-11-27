@@ -1,0 +1,88 @@
+{
+  "schema": "tsg-forge-handoff/v1",
+  "generator": {
+    "tool": "lane-d",
+    "module": "make_handoffs.py",
+    "classifier": "hand-authored to the tsg-forge-handoff/v1 contract"
+  },
+  "source": {
+    "sha256": "66b9d6e62a89f0006e85b06315c2cf54bff0e2b7ed8af52c5aab44084d3cea73",
+    "path": "TSG/AKS/Support-aksarc-module.md"
+  },
+  "article": {
+    "title": "Support.AksArc Module Troubleshooting Guide",
+    "surface": "on-device",
+    "catalog": "partial"
+  },
+  "handoffs": [
+    {
+      "id": "H1",
+      "kind": "operator-handoff",
+      "binding": {
+        "section": "If a test has no automatic fix",
+        "path": [
+          "Support.AksArc Module Troubleshooting Guide",
+          "If a test has no automatic fix"
+        ],
+        "line": 198,
+        "class": "operator-required",
+        "needs": []
+      },
+      "reason": "Restarting a machine moves its workloads, so a person chooses when to do it.",
+      "article_reason": [
+        "`MANUAL-RESTART-NEEDED`: the message names the machine. Restart that machine as described in [Suspend and resume Azure Local machines for maintenance](https://learn.microsoft.com/azure/azure-local/manage/suspend-resume-cluster-maintenance), then run this check again."
+      ],
+      "run_on": "node",
+      "families": [],
+      "instructions": {
+        "text": "`MANUAL-RESTART-NEEDED`: the message names the machine. Restart that machine as described in [Suspend and resume Azure Local machines for maintenance](https://learn.microsoft.com/azure/azure-local/manage/suspend-resume-cluster-maintenance), then run this check again."
+      },
+      "parameters": [],
+      "verify": {
+        "status": "bound",
+        "read_only": true,
+        "criterion": "The check prints `NO-MANUAL-RESTART`.",
+        "commands": [
+          {
+            "surface": "powershell",
+            "text": "$fcErrors = $null\n$rows = @(Test-SupportAksArcKnownIssues -TestId FC-0011 -ErrorVariable fcErrors) + @(Test-SupportAksArcKnownIssues -TestId VMMS-0012)\n$critical = @($fcErrors | Where-Object { \"$_\" -match '^Critical Test ' })\n$failed = @($rows | Where-Object { $_.Status -in 'Failed', 'Error' })\nif ($critical.Count -eq 0 -and $rows.Count -eq 0) { 'TEST-DID-NOT-RUN' }\nelseif ($critical.Count -gt 0 -or $failed.Count -gt 0) { 'MANUAL-RESTART-NEEDED'; $critical | ForEach-Object { \"$_\" }; $failed | Format-List TestName, Status, Message }\nelse { 'NO-MANUAL-RESTART' }",
+            "read_only": true,
+            "handles_secret": false,
+            "run_on": "node",
+            "parameters": [],
+            "pass_when": [
+              "The check prints `NO-MANUAL-RESTART`."
+            ],
+            "success_tokens": [
+              "NO-MANUAL-RESTART"
+            ],
+            "source": {
+              "section": "If a test has no automatic fix",
+              "line": 188,
+              "kind": "code",
+              "sha256": "a188ca8f01c28078c76dae01cde247415f5065e1872d099a7a304c6c207240c7"
+            }
+          }
+        ]
+      },
+      "prechecks": [],
+      "on_verify_fail": {
+        "action": "explain-and-reprompt",
+        "max_reprompts": 2,
+        "then": "stop"
+      },
+      "timeout": {
+        "confirm": "PT30M",
+        "on_timeout": "suspend"
+      },
+      "actor": {
+        "allowed": [
+          "human"
+        ],
+        "record": true
+      }
+    }
+  ],
+  "run_on_peer": [],
+  "findings": []
+}

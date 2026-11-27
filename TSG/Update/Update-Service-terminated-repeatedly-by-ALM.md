@@ -21,16 +21,20 @@ Sample output:
 ```
 Name                                         OwnerNode State
 ----                                         --------- -----
-Azure Stack HCI Update Service Cluster Group v-Host1   Online
+Azure Stack HCI Update Service Cluster Group Node01    Online
 ```
 
-Run the following commands to find events indicating that the update service was terminated due to exceeding the memory limit:
+Run the following commands on that node to find events from the last 24 hours indicating that the update service was terminated due to exceeding the memory limit:
 
 ```powershell
-Get-WinEvent -LogName Application | where ProviderName -eq "AzureStack Agent Lifecycle Agent" | where Message -match "Azure Stack HCI Update Service: Memory Error Limit Reached"
+$since = (Get-Date).AddHours(-24)
+Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'AzureStack Agent Lifecycle Agent'; StartTime = $since } -ErrorAction SilentlyContinue |
+    Where-Object Message -match 'Azure Stack HCI Update Service: Memory Error Limit Reached'
 ```
 
-Sample output. Note the `TimeCreated` value to determine that these are recent, relevant events. If the event times are not recent they are likely not relevant:
+One or more events confirm the issue: the update service is being terminated while preparation runs. If the command returns nothing, the update service has not been terminated for exceeding its memory limit in the last 24 hours, and older events alone do not confirm this issue.
+
+Sample output:
 ```
    ProviderName: AzureStack Agent Lifecycle Agent
 
@@ -49,67 +53,71 @@ There is a bug found in 2509 which is a memory leak in a serializer used by the 
 # Mitigation Details
 
 ## Remove health check result files for installed updates
-Health check result files are stored in the `C:\ClusterStorage\Infrastructure_1\Shares\SU1_Infrastructure_1> cd .\Updates\HealthCheck\` directory on the infrastructure volume. Within that directory, there will be a subdirectory named `System` and additional subdirectories containing the names of installed updates like (for example) `Solution11.2508.1001.51` or `SBE4.1.2508.1`. Directories that correspond to updates that are already installed can be cleaned up.
+Health check result files are stored in the `C:\ClusterStorage\Infrastructure_1\Shares\SU1_Infrastructure_1\Updates\HealthCheck` directory on the infrastructure volume. Within that directory, there will be a subdirectory named `System` and additional subdirectories containing the names of installed updates like (for example) `Solution11.2508.1001.51` or `SBE4.1.2508.1`. Directories that correspond to updates that are already installed can be cleaned up.
 
-The following command can be used to clean up all the directories. Save this script on one of the cluster nodes and run.
+The following script cleans up these directories. Run it on one of the cluster nodes, either saved as a script file or pasted as one whole block. Do not paste it line by line: it is wrapped in `& { }` so that a failed command stops everything after it.
+
+**Changes:** Deletes the health check result folders of installed updates and all but the 10 newest system health check results on the infrastructure share. When it deletes anything, it also clears the update service's update cache. It does not change installed updates or the update service configuration.
 
 ```powershell
-$ErrorActionPreference = "Stop"
+& {
+    $ErrorActionPreference = "Stop"
 
-Write-Host "Checking for installed updates."
-$installedUpdates = Get-SolutionUpdate | where State -eq Installed
-$resourceIds = @( $installedUpdates | % { $_.ResourceId.Split('/')[-1] } )
-Write-Host "Found $($installedUpdates.Count) installed updates: $($resourceIds -join ", ")"
+    Write-Host "Checking for installed updates."
+    $installedUpdates = Get-SolutionUpdate | where State -eq Installed
+    $resourceIds = @( $installedUpdates | % { $_.ResourceId.Split('/')[-1] } )
+    Write-Host "Found $($installedUpdates.Count) installed updates: $($resourceIds -join ", ")"
 
-$removedHC = $false
+    $removedHC = $false
 
-if ($resourceIds.Count -gt 0)
-{
-    foreach ($resourceId in $resourceIds)
+    if ($resourceIds.Count -gt 0)
     {
-        $healthCheckPath = Join-Path "C:\ClusterStorage\Infrastructure_1\Shares\SU1_Infrastructure_1\Updates\HealthCheck" $resourceId
-        if (Test-Path $healthCheckPath)
+        foreach ($resourceId in $resourceIds)
         {
-            Write-Host "Removing health check directory for $resourceId"
+            $healthCheckPath = Join-Path "C:\ClusterStorage\Infrastructure_1\Shares\SU1_Infrastructure_1\Updates\HealthCheck" $resourceId
+            if (Test-Path $healthCheckPath)
+            {
+                Write-Host "Removing health check directory for $resourceId"
+                $removedHC = $true
+                Remove-Item -Path $healthCheckPath -Recurse -Force -Verbose
+            }
+            else
+            {
+                Write-Host "No health check found for $resourceId at $healthCheckPath"
+            }
+        }
+    }
+
+    $systemHealthPath = Join-Path "C:\ClusterStorage\Infrastructure_1\Shares\SU1_Infrastructure_1\Updates\HealthCheck" "System"
+    if (Test-Path $systemHealthPath)
+    {
+        $oldSystemChecks = Get-ChildItem $systemHealthPath | sort LastWriteTime | select -SkipLast 10
+        if ($oldSystemChecks)
+        {
+            Write-Host "Removing $($oldSystemChecks.Count) old system health check results."
             $removedHC = $true
-            Remove-Item -Path $healthCheckPath -Recurse -Force -Verbose
+            $oldSystemChecks | Remove-Item -Force -Verbose
         }
         else
         {
-            Write-Host "No health check found for $resourceId at $healthCheckPath"
+            Write-Host "No stale health checks found at $systemHealthPath"
         }
     }
-}
 
-$systemHealthPath = Join-Path "C:\ClusterStorage\Infrastructure_1\Shares\SU1_Infrastructure_1\Updates\HealthCheck" "System"
-if (Test-Path $systemHealthPath)
-{
-    $oldSystemChecks = Get-ChildItem $systemHealthPath | sort LastWriteTime | select -SkipLast 10
-    if ($oldSystemChecks)
+    if ($removedHC)
     {
-        Write-Host "Removing $($oldSystemChecks.Count) old system health check results."
-        $removedHC = $true
-        $oldSystemChecks | Remove-Item -Force -Verbose
-    }
-    else
-    {
-        Write-Host "No stale health checks found at $systemHealthPath"
-    }
-}
-
-if ($removedHC)
-{
-    Write-Host "Some health checks were removed, so clearing update service cache."
-    $clientCert = ls Cert:\LocalMachine\My\ | ? Subject -match "URP" | sort NotAfter | select -last 1
-    $updateEndpoint = "https://$(Get-ClusterGroup "Azure Stack HCI Update Service Cluster Group" | % OwnerNode | % Name).$($env:USERDNSDOMAIN):4900"
-    $clearCacheResult = Invoke-WebRequest -Certificate $clientCert -UseBasicParsing -Uri "$updateEndpoint/caches/Update" -Method "Delete"
-    if ([int]::TryParse($clearCacheResult.Content, [ref]$null))
-    {
-        Write-Host "Removed $($clearCacheResult.Content) updates from the cache."
-    }
-    else
-    {
-        Write-Host "Result from clearing the cache: $($clearCacheResult | Out-String)"
+        Write-Host "Some health checks were removed, so clearing update service cache."
+        $clientCert = ls Cert:\LocalMachine\My\ | ? Subject -match "URP" | sort NotAfter | select -last 1
+        $updateEndpoint = "https://$(Get-ClusterGroup "Azure Stack HCI Update Service Cluster Group" | % OwnerNode | % Name).$($env:USERDNSDOMAIN):4900"
+        $clearCacheResult = Invoke-WebRequest -Certificate $clientCert -UseBasicParsing -Uri "$updateEndpoint/caches/Update" -Method "Delete"
+        if ([int]::TryParse($clearCacheResult.Content, [ref]$null))
+        {
+            Write-Host "Removed $($clearCacheResult.Content) updates from the cache."
+        }
+        else
+        {
+            Write-Host "Result from clearing the cache: $($clearCacheResult | Out-String)"
+        }
     }
 }
 ```
@@ -117,7 +125,9 @@ if ($removedHC)
 ## Remove failed Update action plan instances
 Delete all failed Update action plans except for the last failed one.
 
-```
+**Changes:** Deletes every failed action plan instance whose name matches `MAS Update`, except the most recent failed one. Other action plan instances are not touched.
+
+```powershell
 Import-Module ECEClient -DisableNameChecking
 $failedUpdates = Get-ActionPlanInstances | ? { $_.Status -eq "Failed" -and $_.ActionPlanName -match "MAS Update" } | sort LastModifiedDateTime -Descending | select -Skip 1
 $instanceIDs = $failedUpdates.InstanceID
@@ -139,6 +149,10 @@ This can be done by changing the configured value for the memory limit in the up
 
 > [!NOTE]
 > The maximum value allowed by ALM resource governance is **8GB (8192 MB)**. If the configured error limit exceeds this, the next Solution update will fail at patching the update service. If the error limit is configured higher than 8GB temporarily, it must be reset down to 8192 or lower before taking the next Solution update.
+
+**Changes:** On every cluster node, rewrites the update service agent manifest in `C:\Agents\AgentManifests` with the new warning and error memory limits, restarts the AzureStack Agent Lifecycle Agent service, and restarts the update service on the node where it is running. Before the next solution update, the error limit must be 8192 MB or lower (see the note above).
+
+**Plan for:** Restarting the update service interrupts any update operation that is running at that moment.
 
 ```powershell
 $nodes = Get-ClusterNode | % Name
@@ -206,4 +220,10 @@ Invoke-Command -ComputerName $nodes -ScriptBlock {
 }
 ```
 
+# Verify the fix
 
+After you apply a mitigation and the update preparation has run again, run the event query from [Issue Validation](#issue-validation) again on the node that owns the `Azure Stack HCI Update Service Cluster Group`. No event should have a `TimeCreated` later than the time you applied the mitigation. Then confirm that the update preparation continues past the health check:
+
+```powershell
+Get-SolutionUpdate | Format-Table DisplayName, State
+```
