@@ -52,7 +52,7 @@ Use this guide on Azure Local 2311.2 or later when you see any of these problems
 
 - Azure Local 2311.2 or later, with the Moc PowerShell module that Azure Local installs on every machine.
 - Sign in directly to one machine of your Azure Local instance, at the console or with Remote Desktop, using your deployment user account or another account that is an administrator on every machine. Open Windows PowerShell as Administrator.
-- Run every command in this guide in Windows PowerShell 5.1 (`powershell.exe`), not in PowerShell 7 (`pwsh.exe`), which Azure Local machines also have. The module doesn't work correctly in PowerShell 7: the test reports a Failover Cluster service failure that isn't real. To check which one you're in, run `$PSVersionTable.PSEdition`. It must return `Desktop`; `Core` means PowerShell 7.
+- Run every command in this guide in Windows PowerShell 5.1 (`powershell.exe`), not in PowerShell 7 (`pwsh.exe`), which newer Azure Local machines also have. The module doesn't work correctly in PowerShell 7: the test reports a Failover Cluster service failure that isn't real. To check which one you're in, run `$PSVersionTable.PSEdition`. It must return `Desktop`; `Core` means PowerShell 7.
 - Don't run the module in a remote PowerShell session, such as `Enter-PSSession` or `Invoke-Command`. The test uses PowerShell remoting from the machine you're signed in to, to reach every machine in the instance that is Up. In a remote session, that machine usually can't pass your sign-in on to the other machines, so the test can't reach them and doesn't run.
 - PowerShell remoting (WinRM) must work from that machine to every machine in the instance that is Up. `Get-ClusterNode` shows the state of each machine.
 - Access to the PowerShell Gallery, directly or through your proxy. You need it to install the module, and each time the module loads it checks the gallery for a newer version.
@@ -153,9 +153,10 @@ foreach ($name in @($vmTest | ForEach-Object { $_.AffectedVMs } | ForEach-Object
     $groups = @(Get-ClusterGroup | Where-Object { $_.Name.Contains($name) })
     if ($groups.Count -gt 0) { $groups | ForEach-Object { "MOC VM $name -> cluster role $($_.Name) on $($_.OwnerNode.Name)" } }
     else {
-        foreach ($node in @(Get-ClusterNode | Where-Object { $_.State -eq 'Up' } | ForEach-Object { $_.Name })) {
+        $vms = @(foreach ($node in @(Get-ClusterNode | Where-Object { $_.State -eq 'Up' } | ForEach-Object { $_.Name })) {
             Get-VM -ComputerName $node -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*$name*" } | ForEach-Object { "MOC VM $name -> Hyper-V VM $($_.Name) on $node" }
-        }
+        })
+        if ($vms.Count -gt 0) { $vms } else { "MOC VM $name -> no matching cluster role or Hyper-V VM found" }
     }
 }
 ```
@@ -233,7 +234,7 @@ Run the test again, and list any test that failed:
 ```powershell
 $results = @(Test-SupportAksArcKnownIssues)
 $failed = @($results | Where-Object { $_.Status -in 'Failed', 'Error' })
-$failed | Format-Table TestName, Status, Message -AutoSize
+$failed | Format-List TestName, Status, Message
 "Tests run: $($results.Count). Failed or error: $($failed.Count)."
 ```
 
@@ -252,6 +253,6 @@ Start-Transcript -Path "$env:USERPROFILE\Desktop\Support-AksArc-$(Get-Date -Form
 Import-Module -Name Support.AksArc
 Get-Module -Name Support.AksArc | Select-Object Name, Version | Out-Host
 Get-SolutionUpdateEnvironment | Select-Object CurrentVersion | Out-Host
-Test-SupportAksArcKnownIssues | Out-Host
+Test-SupportAksArcKnownIssues | Format-List TestName, Status, Message | Out-Host
 Stop-Transcript
 ```
