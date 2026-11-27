@@ -52,7 +52,7 @@ Use this guide on Azure Local 2311.2 or later when you see any of these problems
 
 - Azure Local 2311.2 or later, with the Moc PowerShell module that Azure Local installs on every machine.
 - Sign in directly to one machine of your Azure Local instance, at the console or with Remote Desktop, using your deployment user account or another account that is an administrator on every machine. Open Windows PowerShell as Administrator.
-- Run every command in this guide in Windows PowerShell 5.1 (`powershell.exe`), not in PowerShell 7 (`pwsh.exe`), which Azure Local machines also have. The module doesn't work correctly in PowerShell 7: the test reports a Failover Cluster service failure that isn't real. To check which one you're in, run `$PSVersionTable.PSEdition`. It must return `Desktop`; `Core` means PowerShell 7.
+- Run every command in this guide in Windows PowerShell 5.1 (`powershell.exe`), not in PowerShell 7 (`pwsh.exe`), which newer Azure Local machines also have. The module doesn't work correctly in PowerShell 7: the test reports a Failover Cluster service failure that isn't real. To check which one you're in, run `$PSVersionTable.PSEdition`. It must return `Desktop`; `Core` means PowerShell 7.
 - Don't run the module in a remote PowerShell session, such as `Enter-PSSession` or `Invoke-Command`. The test uses PowerShell remoting from the machine you're signed in to, to reach every machine in the instance that is Up. In a remote session, that machine usually can't pass your sign-in on to the other machines, so the test can't reach them and doesn't run.
 - PowerShell remoting (WinRM) must work from that machine to every machine in the instance that is Up. `Get-ClusterNode` shows the state of each machine.
 - Access to the PowerShell Gallery, directly or through your proxy. You need it to install the module, and each time the module loads it checks the gallery for a newer version.
@@ -100,7 +100,7 @@ The test takes about a minute on a three-machine instance. Version 1.3.164 of th
 - VMs and gallery images that failed to delete, and the user storage containers;
 - the Windows Event Log service.
 
-It only reports what it finds. It doesn't fix anything. Machines that are Down or Paused aren't checked. While it runs, it also prints many `VERBOSE:` progress lines. They're expected.
+It only reports what it finds. It doesn't fix anything. Most tests skip machines that are Down or Paused. The Failover Cluster and Hyper-V Virtual Machine Management service tests check every machine in the cluster, so a machine that is Down makes the Failover Cluster test fail and stops the run with the `Critical Test` error. Bring that machine back Up, or find out why it's Down, before you act on the results. While it runs, it also prints many `VERBOSE:` progress lines. They're expected.
 
 The output ends with a summary line, followed by a table that lists each test with its `TestName`, its `Status`, and a `Message`. For example output, see [Use the Support tool to troubleshoot and fix Azure Local infrastructure problems](https://learn.microsoft.com/azure/azure-local/manage/remediate-support-tool-infrastructure). Use this table to decide what to do next:
 
@@ -124,14 +124,14 @@ Run this command only when the test above reported a `Failed` or `Error` test, o
 - delete stale MOC working folders, and reset MOC PowerShell settings to the standard Azure Local values;
 - re-create the MOC PowerShell registry setting or the cloud agent cluster affinity rule `Cloud Agent-CNO`;
 - start the Windows Event Log service;
-- remove gallery images that failed to delete, and stop and remove VMs that failed to delete because their OS disk was in use.
+- remove gallery images that failed to delete, and stop and remove VMs that failed to delete because their OS disk was in use, along with any other VM whose name contains one of their names.
 
 It doesn't restart the Failover Cluster service or the Hyper-V Virtual Machine Management service.
 
-**Plan for:** Azure Local VM and AKS Arc management operations, such as creating, changing, or deleting a VM, can fail while MOC agents restart or MOC updates. Apart from removing VMs that failed to delete, the fixes work on the MOC infrastructure, not on running VMs. Machines that are Down or Paused aren't fixed. Run the command in a maintenance window.
+**Plan for:** Azure Local VM and AKS Arc management operations, such as creating, changing, or deleting a VM, can fail while MOC agents restart or MOC updates. Apart from the VM removal described in the warning below, the fixes work on the MOC infrastructure, not on running VMs. Machines that are Down or Paused aren't fixed. Run the command in a maintenance window.
 
 > [!WARNING]
-> The module doesn't undo its fixes. An MOC update stays in place. If the test `Validate Virtual Machine Stuck In Deleting Due To OS Disk Lock` failed, the fix stops and removes every VM that its message lists.
+> **[HIGH RISK]** The module doesn't undo its fixes, and there is no rollback. An MOC update stays in place. If the test `Validate Virtual Machine Stuck In Deleting Due To OS Disk Lock` failed, the fix stops and removes every VM that its message lists. It finds those VMs by matching part of the name, so it also stops and removes any other VM whose cluster role or Hyper-V name contains a listed VM's name. A removed VM can't be recovered. Run the check below first, and don't run the command if it shows a VM you don't intend to remove.
 
 First, check whether the fix would remove VMs. This check runs only that test and changes nothing:
 
@@ -143,8 +143,26 @@ else { 'NO-VM-REMOVAL' }
 ```
 
 - `NO-VM-REMOVAL`: run the command below.
-- `VM-REMOVAL-PENDING`: the command below would stop and remove the VMs that the message lists. Run the block that skips that test, after the command below, instead.
+- `VM-REMOVAL-PENDING`: the command below would stop and remove the VMs that the message lists, and any other VM whose name contains one of those names. Run the next check to see every VM it would remove.
 - `TEST-DID-NOT-RUN`: the test ran no checks. Use the results table above to find out why.
+
+If the check printed `VM-REMOVAL-PENDING`, run this in the same PowerShell window. It lists every cluster role and Hyper-V VM that the fix would stop and remove, matched the same way the fix matches them, and changes nothing:
+
+```powershell
+foreach ($name in @($vmTest | ForEach-Object { $_.AffectedVMs } | ForEach-Object { $_.VMName })) {
+    $groups = @(Get-ClusterGroup | Where-Object { $_.Name.Contains($name) })
+    if ($groups.Count -gt 0) { $groups | ForEach-Object { "MOC VM $name -> cluster role $($_.Name) on $($_.OwnerNode.Name)" } }
+    else {
+        $vms = @(foreach ($node in @(Get-ClusterNode | Where-Object { $_.State -eq 'Up' } | ForEach-Object { $_.Name })) {
+            Get-VM -ComputerName $node -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*$name*" } | ForEach-Object { "MOC VM $name -> Hyper-V VM $($_.Name) on $node" }
+        })
+        if ($vms.Count -gt 0) { $vms } else { "MOC VM $name -> no matching cluster role or Hyper-V VM found" }
+    }
+}
+```
+
+- If every VM it lists is one you intend to remove, you can run the command below.
+- If any VM it lists isn't one you intend to remove, or you aren't sure, stop. Don't run the command below. Contact Microsoft Support before you remove any VM. You can still run the block that skips that test, after the command below, to fix the other failed tests.
 
 ```powershell
 if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Run this command in Windows PowerShell 5.1 (powershell.exe), not PowerShell 7.' }
@@ -154,14 +172,19 @@ Invoke-SupportAksArcRemediation
 
 For each test, the command prints either `No remediation required for <test>.`, or `Remediation for <test> is required.` and then `Remediation for <test> succeeded.` or the warning `Remediation for <test> failed.` Two tests have no automatic fix; see [If a test has no automatic fix](#if-a-test-has-no-automatic-fix).
 
-If the check printed `VM-REMOVAL-PENDING`, run this block instead of the command above. It fixes every failed test except `Validate Virtual Machine Stuck In Deleting Due To OS Disk Lock`, which removes VMs. It runs the test and reads each test's ID from its `Running test: <test name> with ID: <ID>` line. Then it runs the remediation for each test that failed, had an error, or stopped the run as a critical test, except `MOC-0017`. It prints:
+If the check printed `VM-REMOVAL-PENDING` and you didn't run the command above, run this block instead. It fixes every failed test except `Validate Virtual Machine Stuck In Deleting Due To OS Disk Lock`, which removes VMs. It runs the test and reads each test's ID from its `Running test: <test name> with ID: <ID>` line. Then it runs the remediation for each test that failed, had an error, or stopped the run as a critical test, except `MOC-0017`. It prints:
 
 - `REMEDIATE <ID>` before each fix;
 - `SKIPPED MOC-0017` if it left that test alone;
 - `NO-FAILED-TESTS` if no test needed a fix;
 - `TEST-DID-NOT-RUN` if the test ran no checks. Use the results table above to find out why.
 
-**Changes:** applies the fixes listed above for the failed tests only, one test at a time, and never removes VMs.
+If a critical test stopped the run, the tests after it didn't run, so this block can't fix them yet. The verify step shows whether any of them failed.
+
+**Changes:** applies the fixes listed above for the failed tests only, one test at a time. It never runs the fix that removes VMs, but it can still update MOC and restart MOC agents.
+
+> [!WARNING]
+> **[HIGH RISK]** This block can't be undone either. An MOC update, renewed MOC identities and certificates, and deleted MOC working folders stay as they are; there is no rollback. If you aren't sure the failed tests are the problem you're troubleshooting, contact Microsoft Support before you run it.
 
 ```powershell
 if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Run this command in Windows PowerShell 5.1 (powershell.exe), not PowerShell 7.' }
@@ -185,18 +208,20 @@ The tests `Failover Cluster service not responsive or not running` (`FC-0011`) a
 After any remediation, run this check. It runs only those two tests and changes nothing:
 
 ```powershell
-$fcErrors = $null
-$rows = @(Test-SupportAksArcKnownIssues -TestId FC-0011 -ErrorVariable fcErrors) + @(Test-SupportAksArcKnownIssues -TestId VMMS-0012)
-$critical = @($fcErrors | Where-Object { "$_" -match '^Critical Test ' })
-$failed = @($rows | Where-Object { $_.Status -in 'Failed', 'Error' })
-if ($critical.Count -eq 0 -and $rows.Count -eq 0) { 'TEST-DID-NOT-RUN' }
-elseif ($critical.Count -gt 0 -or $failed.Count -gt 0) { 'MANUAL-RESTART-NEEDED'; $critical | ForEach-Object { "$_" }; $failed | Format-List TestName, Status, Message }
+if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Run this command in Windows PowerShell 5.1 (powershell.exe), not PowerShell 7.' }
+$fcErrors = $null; $vmmsErrors = $null
+$fcRows = @(Test-SupportAksArcKnownIssues -TestId FC-0011 -ErrorVariable fcErrors)
+$vmmsRows = @(Test-SupportAksArcKnownIssues -TestId VMMS-0012 -ErrorVariable vmmsErrors)
+$critical = @(@($fcErrors) + @($vmmsErrors) | Where-Object { "$_" -match '^Critical Test ' })
+$failed = @(@($fcRows) + @($vmmsRows) | Where-Object { $_.Status -in 'Failed', 'Error' })
+if ($critical.Count -gt 0 -or $failed.Count -gt 0) { 'MANUAL-RESTART-NEEDED'; $critical | ForEach-Object { "$_" }; $failed | Format-List TestName, Status, Message }
+elseif ($fcRows.Count -eq 0 -or $vmmsRows.Count -eq 0) { 'TEST-DID-NOT-RUN' }
 else { 'NO-MANUAL-RESTART' }
 ```
 
 - `NO-MANUAL-RESTART`: continue with [Verify the fix](#verify-the-fix).
 - `MANUAL-RESTART-NEEDED`: the message names the machine. Restart that machine as described in [Suspend and resume Azure Local machines for maintenance](https://learn.microsoft.com/azure/azure-local/manage/suspend-resume-cluster-maintenance), then run this check again. If it still prints `MANUAL-RESTART-NEEDED`, contact Microsoft Support.
-- `TEST-DID-NOT-RUN`: the tests ran no checks. Use the results table above to find out why.
+- `TEST-DID-NOT-RUN`: at least one of the two tests ran no checks, so the check can't say that no restart is needed. Use the results table above to find out why, and then run this check again.
 
 **Changes:** the restart moves the machine's workloads to other machines, restarts it, and returns it to the instance.
 
@@ -209,11 +234,11 @@ Run the test again, and list any test that failed:
 ```powershell
 $results = @(Test-SupportAksArcKnownIssues)
 $failed = @($results | Where-Object { $_.Status -in 'Failed', 'Error' })
-$failed | Format-Table TestName, Status, Message -AutoSize
+$failed | Format-List TestName, Status, Message
 "Tests run: $($results.Count). Failed or error: $($failed.Count)."
 ```
 
-The fix worked when no test is listed, no error is shown, and the last line shows `Failed or error: 0` with a test count above 0, for example `Tests run: 23. Failed or error: 0.` `Tests run: 0` means an error stopped the run. A `Warning` test isn't listed; handle it as described in the results table. If any test is listed, or an error remains, see [Support](#support).
+The fix worked when no test is listed, no error is shown, and the last line shows `Failed or error: 0` with a test count above 0, for example `Tests run: 23. Failed or error: 0.` `Tests run: 0` means an error stopped the run. A `Warning` test isn't listed; handle it as described in the results table. If any test is listed, or an error remains, go back to [Test for issues with remediation](#test-for-issues-with-remediation) once, starting with the check for VM removal. If a test is still listed after that, see [Support](#support).
 
 
 ## Support
@@ -228,6 +253,6 @@ Start-Transcript -Path "$env:USERPROFILE\Desktop\Support-AksArc-$(Get-Date -Form
 Import-Module -Name Support.AksArc
 Get-Module -Name Support.AksArc | Select-Object Name, Version | Out-Host
 Get-SolutionUpdateEnvironment | Select-Object CurrentVersion | Out-Host
-Test-SupportAksArcKnownIssues | Out-Host
+Test-SupportAksArcKnownIssues | Format-List TestName, Status, Message | Out-Host
 Stop-Transcript
 ```
