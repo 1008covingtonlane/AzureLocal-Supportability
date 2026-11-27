@@ -10,8 +10,51 @@ Could not update IgvmAgent on physical node Exception: Cannot remove item C:\Cl
 Note, in the sample error message, _v2 refers to a version 2, which in practice can be v*, * range between 1 and 9.
 
 # Issue Validation
-      
-Ensure the error message you notice matches one of the above error messages.
+
+Run the following PowerShell in an elevated session on one machine in your Azure Local instance. It only reads: for each solution update, it walks the steps of the newest update run and lists every step whose error matches one of the errors above. If the update runs can't be read (for example, the update service is not reachable), it searches the update summary logs on that machine instead; those logs are on the machine that ran the update.
+
+```powershell
+& {
+    $pattern = 'Could not update IgvmAgent on physical node'
+    $found = @()
+    $fromLogs = $false
+    try {
+        foreach ($update in @(Get-SolutionUpdate -ErrorAction Stop)) {
+            # Only the newest run of each update counts: a later run that got past the step means the error is gone.
+            $run = @($update | Get-SolutionUpdateRun -ErrorAction Stop |
+                Sort-Object { if ($_.TimeStarted) { [datetime]$_.TimeStarted } else { [datetime]::MinValue } } -Descending)[0]
+            if ($null -eq $run) { continue }
+            $pending = [System.Collections.Generic.Queue[object]]::new()
+            if ($null -ne $run.Progress) { $pending.Enqueue($run.Progress) }
+            while ($pending.Count -gt 0) {
+                $step = $pending.Dequeue()
+                if ("$($step.ErrorMessage) $($step.AggregatedErrorMessages)" -match $pattern) {
+                    $found += [pscustomobject]@{ UpdateRun = $run.ResourceId; Step = $step.Name; Status = $step.Status; Error = $step.ErrorMessage }
+                }
+                foreach ($child in @($step.Steps)) { if ($null -ne $child) { $pending.Enqueue($child) } }
+            }
+        }
+    }
+    catch {
+        Write-Host "Could not read the update runs ($($_.Exception.Message)). Searching the update summary logs on this machine instead."
+        $fromLogs = $true
+        $found = @(Select-String -Path 'C:\CloudDeployment\Logs\UpdateSummary*.xml' -Pattern $pattern -SimpleMatch -ErrorAction SilentlyContinue |
+            Select-Object @{ n = 'File'; e = { $_.Path } }, @{ n = 'Line'; e = { $_.LineNumber } }, @{ n = 'Error'; e = { $_.Line.Trim() } })
+    }
+    if ($found.Count -gt 0) {
+        'The IgvmAgent update error is present.'
+        $found | Format-List
+    }
+    elseif ($fromLogs) {
+        'No update summary log on this machine shows the IgvmAgent update error. Run this on the machine that ran the update.'
+    }
+    else {
+        'No update run shows the IgvmAgent update error.'
+    }
+}
+```
+
+If the error is present, the output lists the update run, the step (for example `Update IgvmAgent`), its status and the error text: continue with Mitigation Details. If no update run shows the error, this article does not apply.
 
 # Cause
 This occurs because there is an underlying issue with removing certain folders. We have fixed this in 2506 release.
@@ -27,5 +70,6 @@ For customers updating their Azure Local instance to 2505 release, if you encoun
    - Run update action plan for IGVM Agent by running: ```$guid = Invoke-ActionPlanInstance -RolePath IgvmAgentDeployment -ActionType DeployIgvmAgent -EceClient:$ececlient```
    - Monitor the action plan until it succeeds by running: ```Start-MonitoringActionplanInstanceToComplete $guid```
 3. [Required] Resume Azure Local update (repeat steps to update your Azure Local instance).
+4. Verify the fix: after the update resumes, run the script in Issue Validation again. When the newest update run has got past the `Update IgvmAgent` step, it prints `No update run shows the IgvmAgent update error.`
 
 Alternately, you can skip 2505 and directly update your Azure Local instance to 2506 release or above to resolve the issue.
