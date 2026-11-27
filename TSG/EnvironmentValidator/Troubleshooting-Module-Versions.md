@@ -37,6 +37,7 @@
 | --- | --- |
 | 2026-11-20 | Corrected the expected inbox module path and the Issue Validation command. Added the error that newer builds show, steps for module files that are still in use, commands for all machines, and guidance to verify, escalate, and prevent the problem. Added the metadata marker. Step 1 now lists every PowerShell session that could hold the external copy's files, including remote sessions, and the impact labels are replaced with plain statements of what each step changes. |
 | 2026-11-26 | Step 1 now names the exact processes that hold the files, Step 2 stops only the user PowerShell sessions from that reviewed list while no update is running, and new scripts check every reachable machine and resume an update that failed with this error. Step 2 and Step 6 now stop when they cannot tell whether the machine is in a cluster, and the retry script resumes an update only when a failed step shows the error. |
+| 2026-11-27 | Step 1 saves its list on the machine and Step 2 reads it from there, so each step can run in its own PowerShell window or process. Step 4 again checks the files directly. |
 
 ## At a glance
 
@@ -176,24 +177,25 @@ How to read the result for each machine. The all-machines check prints the same 
 | Result | Meaning | Next step |
 | --- | --- | --- |
 | `EXTERNAL_COPY_FOUND` | An external copy is present. | Follow Steps 1 to 7 in [Mitigation Details](#mitigation-details). |
-| `LEFTOVER_FOLDER_ONLY` | A leftover folder from a partly removed copy. It no longer loads. | Go to [Step 7](#step-7-delete-leftover-folders). If it tells you to leave the folder until the next planned restart, no further action is needed now. |
+| `LEFTOVER_FOLDER_ONLY` | A leftover folder from a partly removed copy. It no longer loads. | Follow Steps 1 to 7 in [Mitigation Details](#mitigation-details). Steps 1 to 4 release the folder's files if a program still holds them, Step 5 has nothing to uninstall, and [Step 7](#step-7-delete-leftover-folders) deletes the folder. If Step 7 tells you to leave the folder until the next planned restart, no further action is needed now. |
 | `NOT_AFFECTED` | This machine is not affected. | None. |
 | `INBOX_MODULE_MISSING` | The inbox module is missing. | Stop and [contact Microsoft support](#when-to-contact-microsoft-support). Do not install a replacement. The cleanup scripts in Steps 5 and 7 remove nothing on a machine without the inbox module, and the retry script retries nothing. |
 | `Not checked from here` | All-machines check only: PowerShell remoting to that machine failed, so it was not checked. This does not mean that it is affected. `Note` shows the reason. | Run the single-machine check on that machine. |
 
 ## Mitigation Details
 
-Run these steps in order on each affected machine, in one PowerShell window: Step 2 uses the list that Step 1 saves in that window. Each script checks or changes only the machine it runs on, is safe to run when it has nothing to do, and prints its result line first. Paste or run each block whole. None of the steps affects running VMs or needs a maintenance window, except the restart that [Step 6](#step-6-check-whether-a-restart-is-needed) can ask for.
+Run these steps in order on each affected machine. Step 2 uses the list that Step 1 saves on the machine, so you can run each step in a new PowerShell window. Each script checks or changes only the machine it runs on, is safe to run when it has nothing to do, and prints its result line first. Paste or run each block whole. None of the steps affects running VMs or needs a maintenance window, except the restart that [Step 6](#step-6-check-whether-a-restart-is-needed) can ask for.
 
 ### Step 1: Find the processes that hold the external copy's files
 
-This step changes nothing. It asks Windows Restart Manager which processes hold files in the external copy's folders, including a copy outside `C:\Program Files`, for example one installed for the current user only, and in leftover version-number folders, lists each one with its owner, sign-in session, start time, Windows service, and command line, and says in `NextStep` what to do about it. `Get-Process` does not show these files, because PowerShell loads the module's .NET files in a way that it does not list. Remote PowerShell sessions appear as `wsmprovhost`.
+This step asks Windows Restart Manager which processes hold files in the external copy's folders, including a copy outside `C:\Program Files`, for example one installed for the current user only, and in leftover version-number folders, lists each one with its owner, sign-in session, start time, Windows service, and command line, and says in `NextStep` what to do about it. `Get-Process` does not show these files, because PowerShell loads the module's .NET files in a way that it does not list. Remote PowerShell sessions appear as `wsmprovhost`.
 
-The script marks a process `Step 2 stops it.` only if it is a PowerShell window (`powershell`, `powershell_ise`, or `pwsh`) that a person started: it does not run as SYSTEM, LocalService, NetworkService, or an account that runs a Windows service, does not run or belong to a Windows service, and is in a signed-in user's session. It never marks a remote session (`wsmprovhost`), because Azure Local's own operations also run in remote sessions, and the two look the same. It saves the marked processes, by process ID and start time, for Step 2.
+The script marks a process `Step 2 stops it.` only if it is a PowerShell window (`powershell`, `powershell_ise`, or `pwsh`) that a person started: it does not run as SYSTEM, LocalService, NetworkService, or an account that runs a Windows service, does not run or belong to a Windows service, and is in a signed-in user's session. It never marks a remote session (`wsmprovhost`), because Azure Local's own operations also run in remote sessions, and the two look the same. It saves the list, with each process's ID, start time, name, owner, and whether it is marked, for Step 2. If it cannot save the list, it says so after its result line, and Step 2 stops nothing.
+
+**Changes:** saves the list to `C:\ProgramData\AzStackHci.EnvironmentChecker.Step1List.json`, replacing an earlier list. When no process holds the files, it deletes an earlier list and saves none. Step 2 deletes the list when it ends. Nothing else changes.
 
 ```powershell
-. {
-    $envCheckerReviewed = @()
+& {
     if ($PSVersionTable.PSEdition -ne 'Desktop') {
         Write-Output 'WINDOWS_POWERSHELL_REQUIRED'
         Write-Output 'Run this in Windows PowerShell 5.1 (powershell.exe), not in PowerShell 7.'
@@ -298,13 +300,26 @@ public static class EnvCheckerFileHolders {
                 CanStop     = $canStop
                 NextStep    = $next
                 CommandLine = $process.CommandLine
-                Key         = "$id|$(if ($process.CreationDate) { $process.CreationDate.ToString('o') })"
+                Key         = "$id|$(if ($process.CreationDate) { $process.CreationDate.ToUniversalTime().Ticks })"
             }
         }
     }
     $holders = @()
     $checkError = $null
     try { $holders = @(Get-EnvCheckerFileHolder) } catch { $checkError = $_.Exception.Message }
+    $listPath = Join-Path $env:ProgramData 'AzStackHci.EnvironmentChecker.Step1List.json'
+    $listError = $null
+    try {
+        if (Test-Path -LiteralPath $listPath) { Remove-Item -LiteralPath $listPath -Force -ErrorAction Stop }
+        if (-not $checkError -and $holders.Count -gt 0) {
+            [pscustomobject]@{
+                Machine      = $env:COMPUTERNAME
+                Written      = (Get-Date).ToString('o')
+                WrittenTicks = [DateTime]::UtcNow.Ticks
+                Processes    = @($holders | ForEach-Object { [pscustomobject]@{ ProcessId = $_.ProcessId; Name = $_.Name; Owner = $_.Owner; StartTime = "$($_.StartTime)"; StepTwoStops = $_.CanStop; Key = $_.Key } })
+            } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $listPath -Encoding UTF8 -ErrorAction Stop
+        }
+    } catch { $listError = $_.Exception.Message }
     if ($checkError) {
         Write-Output 'LOCK_CHECK_UNAVAILABLE'
         Write-Output "Restart Manager could not be used in this PowerShell session: $checkError"
@@ -316,7 +331,8 @@ public static class EnvCheckerFileHolders {
     else {
         if (@($holders | Where-Object { -not $_.CanStop }).Count -gt 0) { Write-Output 'OTHER_HOLDERS_FOUND' }
         else { Write-Output 'LOCKING_SESSIONS_FOUND' }
-        $envCheckerReviewed = @($holders | Where-Object { $_.CanStop } | ForEach-Object { $_.Key })
+        if ($listError) { "Step 2 cannot run, because this list could not be saved to ${listPath}: $listError Close the PowerShell windows marked 'Step 2 stops it.' yourself, or ask their owners to, then continue after Step 2." }
+        else { "This list is saved in $listPath for Step 2." }
         $holders | Format-List ProcessId, Name, Owner, SessionId, Service, StartTime, NextStep, CommandLine
     }
 }
@@ -324,79 +340,214 @@ public static class EnvCheckerFileHolders {
 
 | Result | Meaning | Next step |
 | --- | --- | --- |
-| `LOCKING_SESSIONS_FOUND` | Only PowerShell sessions that Step 2 stops hold the files. Check each `Owner` and `CommandLine` before you continue. | Go to Step 2. |
-| `OTHER_HOLDERS_FOUND` | At least one listed process is one that Step 2 does not stop. Its `NextStep` says what to do. | Go to Step 2, then Step 3. |
+| `LOCKING_SESSIONS_FOUND` | Only PowerShell sessions that Step 2 stops hold the files. The list is saved for Step 2. Check each `Owner` and `CommandLine` before you continue. | Go to Step 2. |
+| `OTHER_HOLDERS_FOUND` | At least one listed process is one that Step 2 does not stop. Its `NextStep` says what to do. The list is saved for Step 2. | Go to Step 2, then Step 3. |
 | `NO_LOCKING_SESSIONS` | No process holds the files. | Go to Step 5. |
 | `LOCK_CHECK_UNAVAILABLE` | Restart Manager could not run in this session, so nothing was checked, and Step 2 stops nothing. The cleanup in Step 5 still removes the copy's module manifest, so the copy stops loading even if some files stay in use. | Close any other PowerShell window that you opened on this machine and no longer need, then go to Step 5. |
 | `WINDOWS_POWERSHELL_REQUIRED` | The script ran in PowerShell 7 and checked nothing. | Open Windows PowerShell 5.1 as administrator and run Step 1 again. |
 
 ### Step 2: Stop the PowerShell sessions that hold the files
 
-Run this in the same window, after you have read the Step 1 list. It stops a process only if Step 1 marked it `Step 2 stops it.`, it is the same process (same process ID and start time), and it still holds the files. On a deployed system it first reads the solution update state and stops nothing while an update or a health check is running. It treats the machine as not yet deployed only when the Cluster service (ClusSvc) is not installed or the machine has no cluster database (`%SystemRoot%\Cluster\CLUSDB`), which every cluster member keeps. If `Get-ClusterNode` fails and neither is confirmed, it stops nothing. It cannot check deployment, add node, or repair node operations, so confirm in the Azure portal that none is running. If the list includes another person's session, ask them before you run this step.
+Run this after you have read the Step 1 list, in any PowerShell window on the same machine. It reads the list that Step 1 saved and stops a process only if Step 1 marked it `Step 2 stops it.`, it is the same process (same process ID and start time), it still holds the files, and the same check that Step 1 runs still marks it. It uses a list only if an administrator wrote it in the last 60 minutes, and it deletes the list when it ends, whatever it prints, so each list is used once. On a deployed system it first reads the solution update state and stops nothing while an update or a health check is running. It treats the machine as not yet deployed only when the Cluster service (ClusSvc) is not installed or the machine has no cluster database (`%SystemRoot%\Cluster\CLUSDB`), which every cluster member keeps. If `Get-ClusterNode` fails and neither is confirmed, it stops nothing. It cannot check deployment, add node, or repair node operations, so confirm in the Azure portal that none is running. If the list includes another person's session, ask them before you run this step.
 
-**Changes:** stops the PowerShell windows described above. Work that is not saved in them is lost. It does not stop the window you run it from, any service, or any other process. Running VMs are not affected.
+**Changes:** stops the PowerShell windows described above. Work that is not saved in them is lost. It does not stop the window you run it from, any service, or any other process. It deletes the list that Step 1 saved. Running VMs are not affected.
 
 ```powershell
 & {
-    if (-not (Get-Command -Name Get-EnvCheckerFileHolder -CommandType Function -ErrorAction SilentlyContinue)) {
-        Write-Output 'STEP_1_NOT_RUN'
-        Write-Output 'Nothing was stopped. Run Step 1 in this window and review its list first.'
+    if ($PSVersionTable.PSEdition -ne 'Desktop') {
+        Write-Output 'WINDOWS_POWERSHELL_REQUIRED'
+        Write-Output 'Nothing was stopped. Run this in Windows PowerShell 5.1 (powershell.exe), not in PowerShell 7.'
         return
     }
-    $clusterState = 'Unknown'
-    $clusterNote = 'Get-ClusterNode returned no machines.'
-    try { $clusterNodes = @(Get-ClusterNode -ErrorAction Stop); if ($clusterNodes.Count -gt 0) { $clusterState = 'Cluster' } } catch { $clusterNote = $_.Exception.Message }
-    if ($clusterState -eq 'Unknown') {
-        try { if (@(Get-CimInstance -ClassName Win32_Service -Filter "Name = 'ClusSvc'" -ErrorAction Stop).Count -eq 0) { $clusterState = 'None' } } catch { }
-    }
-    if ($clusterState -eq 'Unknown') {
-        try { $null = Get-Item -LiteralPath (Join-Path $env:SystemRoot 'Cluster\CLUSDB') -Force -ErrorAction Stop }
-        catch [System.Management.Automation.ItemNotFoundException] { $clusterState = 'None' }
-        catch { }
-    }
-    if ($clusterState -eq 'Unknown') {
-        Write-Output 'CLUSTER_STATE_UNKNOWN'
-        Write-Output "Nothing was stopped. Could not tell whether this machine is in a cluster: $clusterNote"
+    $listPath = Join-Path $env:ProgramData 'AzStackHci.EnvironmentChecker.Step1List.json'
+    if (-not (Test-Path -LiteralPath $listPath)) {
+        Write-Output 'STEP_1_LIST_MISSING'
+        Write-Output 'Nothing was stopped. Run Step 1 again, review its list, then run this step.'
         return
     }
-    if ($clusterState -eq 'Cluster') {
-        Import-Module -Name Microsoft.AzureStack.Lcm.PowerShell -ErrorAction SilentlyContinue 4>$null
+    try {
+        function Get-EnvCheckerFileHolder {
+            $moduleRoot = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules\AzStackHci.EnvironmentChecker'
+            $folders = @(Get-ChildItem -Path $moduleRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -as [version] } | ForEach-Object { $_.FullName }) +
+                @(Get-Module -Name 'AzStackHci.EnvironmentChecker' -ListAvailable | Where-Object { $_.Path -like "*$($_.Version)*" } | ForEach-Object { $_.ModuleBase })
+            $files = @($folders | Sort-Object -Unique |
+                ForEach-Object { Get-ChildItem -LiteralPath $_ -Recurse -File -Force -ErrorAction SilentlyContinue } |
+                ForEach-Object { $_.FullName } | Sort-Object -Unique)
+            if ($files.Count -eq 0) { return }
+            if (-not ('EnvCheckerFileHolders' -as [type])) {
+                Add-Type -ErrorAction Stop -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class EnvCheckerFileHolders {
+    [StructLayout(LayoutKind.Sequential)]
+    struct RM_UNIQUE_PROCESS { public int ProcessId; public System.Runtime.InteropServices.ComTypes.FILETIME StartTime; }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct RM_PROCESS_INFO {
+        public RM_UNIQUE_PROCESS Process;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string AppName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)] public string ServiceShortName;
+        public int ApplicationType; public uint AppStatus; public uint SessionId;
+        [MarshalAs(UnmanagedType.Bool)] public bool Restartable;
+    }
+    [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+    static extern int RmStartSession(out uint session, int flags, StringBuilder key);
+    [DllImport("rstrtmgr.dll")]
+    static extern int RmEndSession(uint session);
+    [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+    static extern int RmRegisterResources(uint session, uint fileCount, string[] files, uint appCount, RM_UNIQUE_PROCESS[] apps, uint serviceCount, string[] services);
+    [DllImport("rstrtmgr.dll")]
+    static extern int RmGetList(uint session, out uint needed, ref uint count, [In, Out] RM_PROCESS_INFO[] info, ref uint reasons);
+    public static int[] GetProcessIds(string[] files) {
+        uint session;
+        int rc = RmStartSession(out session, 0, new StringBuilder(64));
+        if (rc != 0) { throw new Win32Exception(rc); }
         try {
-            $active = @(Get-SolutionUpdate -ErrorAction Stop 4>$null | Where-Object { ('Installing', 'Preparing', 'HealthChecking', 'Downloading', 'ScanInProgress' -contains $_.State) -or ($_.HealthState -eq 'InProgress') })
-            $environment = Get-SolutionUpdateEnvironment -ErrorAction Stop 4>$null
-            if (("$($environment.State)" -like '*InProgress*') -or ("$($environment.HealthState)" -eq 'InProgress')) { $active += [pscustomobject]@{ DisplayName = 'The system health check'; State = 'InProgress' } }
-        }
-        catch {
-            Write-Output 'UPDATE_STATE_UNKNOWN'
-            Write-Output "Nothing was stopped. Could not read the solution update state: $($_.Exception.Message)"
-            return
-        }
-        if ($active.Count -gt 0) {
-            Write-Output 'UPDATE_IN_PROGRESS'
-            Write-Output "Nothing was stopped. $($active[0].DisplayName) is $($active[0].State)."
-            return
-        }
-    }
-    try { $holders = @(Get-EnvCheckerFileHolder) }
-    catch {
-        Write-Output 'LOCK_CHECK_UNAVAILABLE'
-        Write-Output "Nothing was stopped: $($_.Exception.Message)"
-        return
-    }
-    $lines = @(foreach ($row in $holders) {
-        if ($row.CanStop -and ($envCheckerReviewed -contains $row.Key)) {
-            try {
-                Stop-Process -Id $row.ProcessId -Force -ErrorAction Stop
-                Wait-Process -Id $row.ProcessId -Timeout 30 -ErrorAction SilentlyContinue
-                "Stopped $($row.Name), process ID $($row.ProcessId), owner $($row.Owner), started $($row.StartTime)."
+            rc = RmRegisterResources(session, (uint)files.Length, files, 0, null, 0, null);
+            if (rc != 0) { throw new Win32Exception(rc); }
+            for (int attempt = 0; attempt < 5; attempt++) {
+                uint needed = 0, count = 0, reasons = 0;
+                rc = RmGetList(session, out needed, ref count, null, ref reasons);
+                if (rc == 0) { return new int[0]; }
+                if (rc != 234) { throw new Win32Exception(rc); }
+                RM_PROCESS_INFO[] info = new RM_PROCESS_INFO[needed];
+                count = needed;
+                rc = RmGetList(session, out needed, ref count, info, ref reasons);
+                if (rc == 0) {
+                    List<int> ids = new List<int>();
+                    for (int i = 0; i < count; i++) { ids.Add(info[i].Process.ProcessId); }
+                    return ids.ToArray();
+                }
+                if (rc != 234) { throw new Win32Exception(rc); }
             }
-            catch { "Could not stop $($row.Name), process ID $($row.ProcessId): $($_.Exception.Message)" }
+            throw new Win32Exception(234);
         }
-        elseif ($row.CanStop) { "Left running: $($row.Name), process ID $($row.ProcessId). It was not in the list you reviewed. Run Step 1 again to review it." }
-        else { "Left running: $($row.Name), process ID $($row.ProcessId). $($row.NextStep)" }
-    })
-    if (@($lines | Where-Object { $_ -like 'Stopped *' }).Count -gt 0) { Write-Output 'SESSIONS_STOPPED' } else { Write-Output 'NO_SESSIONS_STOPPED' }
-    $lines
+        finally { RmEndSession(session); }
+    }
+}
+'@
+            }
+            $holderIds = @([EnvCheckerFileHolders]::GetProcessIds([string[]]$files) | Sort-Object -Unique)
+            $services = @(Get-CimInstance -ClassName Win32_Service -ErrorAction Stop)
+            $servicePids = @($services | Where-Object { $_.ProcessId -gt 0 } | ForEach-Object { $_.ProcessId })
+            $serviceSids = @('S-1-5-18', 'S-1-5-19', 'S-1-5-20') + @($services | ForEach-Object {
+                try { ([System.Security.Principal.NTAccount]($_.StartName -replace '^\.\\', "$env:COMPUTERNAME\")).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { }
+            })
+            foreach ($id in $holderIds) {
+                $process = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $id" -ErrorAction SilentlyContinue
+                if (-not $process) { continue }
+                $name = $process.Name -replace '\.exe$', ''
+                $sid = (Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid -ErrorAction SilentlyContinue).Sid
+                $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwner -ErrorAction SilentlyContinue
+                $ownerName = if ($owner.User) { "$($owner.Domain)\$($owner.User)" } else { 'unknown' }
+                $parent = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $($process.ParentProcessId)" -ErrorAction SilentlyContinue
+                $hostsService = $servicePids -contains $id
+                $serviceParent = ($servicePids -contains $process.ParentProcessId) -or ($parent.Name -eq 'services.exe')
+                $userAccount = $sid -and ($serviceSids -notcontains $sid)
+                if ('powershell', 'pwsh', 'powershell_ise' -contains $name) { $canStop = $userAccount -and -not $hostsService -and -not $serviceParent -and ($process.SessionId -ne 0) }
+                else { $canStop = $false }
+                if ($id -eq $PID) { $canStop = $false; $next = 'This PowerShell window holds the files. Close it, open a new window, and start again at Step 1.' }
+                elseif ($canStop) { $next = 'Step 2 stops it.' }
+                elseif ($name -eq 'wsmprovhost' -and $userAccount -and -not $hostsService) { $next = "Remote PowerShell session of $ownerName. Ask them to end it on the computer that opened it. If no one can, leave it running; Step 5 removes what it can." }
+                elseif (-not $userAccount -or $hostsService -or $serviceParent) { $next = 'It runs as or for a Windows service. Leave it running; Step 5 removes what it can, and Step 6 says whether a restart is needed.' }
+                elseif ($process.SessionId -eq 0) { $next = "Ask $ownerName to close it or end their remote session. Never sign out session 0." }
+                elseif ($process.SessionId -eq (Get-Process -Id $PID).SessionId) { $next = 'It runs in your own sign-in session. Close it.' }
+                else { $next = "Ask $ownerName to close it. If that is not possible, sign the user out with: logoff $($process.SessionId)" }
+                [pscustomobject]@{
+                    ProcessId   = $id
+                    Name        = $process.Name
+                    Owner       = $ownerName
+                    SessionId   = $process.SessionId
+                    Service     = @($services | Where-Object { $_.ProcessId -eq $id } | ForEach-Object { $_.Name }) -join ', '
+                    StartTime   = $process.CreationDate
+                    CanStop     = $canStop
+                    NextStep    = $next
+                    CommandLine = $process.CommandLine
+                    Key         = "$id|$(if ($process.CreationDate) { $process.CreationDate.ToUniversalTime().Ticks })"
+                }
+            }
+        }
+        $reviewed = @()
+        $listAge = $null
+        $listProblem = $null
+        try {
+            $owner = (Get-Acl -LiteralPath $listPath -ErrorAction Stop).GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+            $me = try { [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value } catch { $null }
+            if ('S-1-5-32-544', 'S-1-5-18', $me -notcontains $owner) { $listProblem = "It is owned by $owner, not by an administrator." }
+            else {
+                $list = Get-Content -LiteralPath $listPath -Raw -ErrorAction Stop | ConvertFrom-Json
+                $listAge = [TimeSpan]::FromTicks([DateTime]::UtcNow.Ticks - [long]$list.WrittenTicks).TotalMinutes
+                $reviewed = @(@($list.Processes) | Where-Object { $_.StepTwoStops -eq $true } | ForEach-Object { "$($_.Key)" })
+            }
+        } catch { $listProblem = $_.Exception.Message }
+        if ($listProblem) {
+            Write-Output 'STEP_1_LIST_NOT_USABLE'
+            Write-Output "Nothing was stopped. The list that Step 1 saved cannot be used: $listProblem"
+            return
+        }
+        if ($listAge -lt 0 -or $listAge -gt 60) {
+            Write-Output 'STEP_1_LIST_STALE'
+            Write-Output 'Nothing was stopped, because the list that Step 1 saved was not written in the last 60 minutes. Run Step 1 again, review its list, then run this step.'
+            return
+        }
+        $clusterState = 'Unknown'
+        $clusterNote = 'Get-ClusterNode returned no machines.'
+        try { $clusterNodes = @(Get-ClusterNode -ErrorAction Stop); if ($clusterNodes.Count -gt 0) { $clusterState = 'Cluster' } } catch { $clusterNote = $_.Exception.Message }
+        if ($clusterState -eq 'Unknown') {
+            try { if (@(Get-CimInstance -ClassName Win32_Service -Filter "Name = 'ClusSvc'" -ErrorAction Stop).Count -eq 0) { $clusterState = 'None' } } catch { }
+        }
+        if ($clusterState -eq 'Unknown') {
+            try { $null = Get-Item -LiteralPath (Join-Path $env:SystemRoot 'Cluster\CLUSDB') -Force -ErrorAction Stop }
+            catch [System.Management.Automation.ItemNotFoundException] { $clusterState = 'None' }
+            catch { }
+        }
+        if ($clusterState -eq 'Unknown') {
+            Write-Output 'CLUSTER_STATE_UNKNOWN'
+            Write-Output "Nothing was stopped. Could not tell whether this machine is in a cluster: $clusterNote"
+            return
+        }
+        if ($clusterState -eq 'Cluster') {
+            Import-Module -Name Microsoft.AzureStack.Lcm.PowerShell -ErrorAction SilentlyContinue 4>$null
+            try {
+                $active = @(Get-SolutionUpdate -ErrorAction Stop 4>$null | Where-Object { ('Installing', 'Preparing', 'HealthChecking', 'Downloading', 'ScanInProgress' -contains $_.State) -or ($_.HealthState -eq 'InProgress') })
+                $environment = Get-SolutionUpdateEnvironment -ErrorAction Stop 4>$null
+                if (("$($environment.State)" -like '*InProgress*') -or ("$($environment.HealthState)" -eq 'InProgress')) { $active += [pscustomobject]@{ DisplayName = 'The system health check'; State = 'InProgress' } }
+            }
+            catch {
+                Write-Output 'UPDATE_STATE_UNKNOWN'
+                Write-Output "Nothing was stopped. Could not read the solution update state: $($_.Exception.Message)"
+                return
+            }
+            if ($active.Count -gt 0) {
+                Write-Output 'UPDATE_IN_PROGRESS'
+                Write-Output "Nothing was stopped. $($active[0].DisplayName) is $($active[0].State)."
+                return
+            }
+        }
+        try { $holders = @(Get-EnvCheckerFileHolder) }
+        catch {
+            Write-Output 'LOCK_CHECK_UNAVAILABLE'
+            Write-Output "Nothing was stopped: $($_.Exception.Message)"
+            return
+        }
+        $lines = @(foreach ($row in $holders) {
+            if ($row.CanStop -and ($reviewed -contains $row.Key)) {
+                try {
+                    Stop-Process -Id $row.ProcessId -Force -ErrorAction Stop
+                    Wait-Process -Id $row.ProcessId -Timeout 30 -ErrorAction SilentlyContinue
+                    "Stopped $($row.Name), process ID $($row.ProcessId), owner $($row.Owner), started $($row.StartTime)."
+                }
+                catch { "Could not stop $($row.Name), process ID $($row.ProcessId): $($_.Exception.Message)" }
+            }
+            elseif ($row.CanStop) { "Left running: $($row.Name), process ID $($row.ProcessId). It was not in the list you reviewed. Run Steps 1 and 2 again to review it." }
+            else { "Left running: $($row.Name), process ID $($row.ProcessId). $($row.NextStep)" }
+        })
+        if (@($lines | Where-Object { $_ -like 'Stopped *' }).Count -gt 0) { Write-Output 'SESSIONS_STOPPED' } else { Write-Output 'NO_SESSIONS_STOPPED' }
+        $lines
+    }
+    finally { Remove-Item -LiteralPath $listPath -Force -ErrorAction SilentlyContinue }
 }
 ```
 
@@ -405,9 +556,13 @@ Run this in the same window, after you have read the Step 1 list. It stops a pro
 | `SESSIONS_STOPPED` | The script stopped the sessions it lists, and lists each process that it left running. | Go to Step 3 if Step 1 printed `OTHER_HOLDERS_FOUND`; otherwise go to Step 4. |
 | `NO_SESSIONS_STOPPED` | No reviewed session still held the files. | Go to Step 3 if Step 1 printed `OTHER_HOLDERS_FOUND`; otherwise go to Step 4. |
 | `UPDATE_IN_PROGRESS` | A solution update or a health check is running, so nothing was stopped. Its PowerShell sessions can hold the files. | Wait until the update stops, then start again at Step 1. |
-| `UPDATE_STATE_UNKNOWN` | The update state could not be read, so nothing was stopped. | Run Step 2 again in a minute. If it keeps printing this, go to Step 5. |
+| `UPDATE_STATE_UNKNOWN` | The update state could not be read, so nothing was stopped. | Run Steps 1 and 2 again in a minute. If Step 2 keeps printing this, go to Step 5. |
 | `CLUSTER_STATE_UNKNOWN` | `Get-ClusterNode` failed or returned no machines, and the script could not confirm that the Cluster service is not installed or that the machine has no cluster database, so it could not tell whether an update can be running. Nothing was stopped. The line after it shows the reason. | Confirm in the Azure portal that no update, deployment, add node, or repair node operation is running. Then ask the owner of each session that Step 1 marked `Step 2 stops it.` to close it, or close it yourself if it is yours, and go to Step 4. |
-| `STEP_1_NOT_RUN` or `LOCK_CHECK_UNAVAILABLE` | Nothing was stopped. | Run Step 1 in this window, then this step again. If Step 1 prints `LOCK_CHECK_UNAVAILABLE`, follow its row. |
+| `STEP_1_LIST_MISSING` | No list from Step 1 is saved on this machine, so nothing was stopped. Step 1 saves a list only when it finds processes that hold the files, and this step deletes it when it ends. | Run Step 1 again, review its list, then run this step. |
+| `STEP_1_LIST_STALE` | The saved list was not written in the last 60 minutes, so it was not used and nothing was stopped. | Run Step 1 again, review its list, then run this step. |
+| `STEP_1_LIST_NOT_USABLE` | The saved list could not be read, or it was not written by an administrator, so it was not used and nothing was stopped. The line after it shows the reason. | Run Step 1 again, review its list, then run this step. |
+| `LOCK_CHECK_UNAVAILABLE` | Restart Manager could not run in this session, so nothing was stopped. | Follow the `LOCK_CHECK_UNAVAILABLE` row of Step 1. |
+| `WINDOWS_POWERSHELL_REQUIRED` | The script ran in PowerShell 7 and stopped nothing. | Open Windows PowerShell 5.1 as administrator and run Steps 1 and 2 again. |
 
 ### Step 3: Close the other programs that hold the files
 
@@ -417,7 +572,53 @@ Do this step only if Step 1 printed `OTHER_HOLDERS_FOUND`. For each process whos
 
 ### Step 4: Confirm that the files are released
 
-Run the Step 1 script again in the same window. It changes nothing. If it prints `NO_LOCKING_SESSIONS`, the files are released. If it lists a process that Step 2 stops, run Step 2 again. If it still lists processes that you cannot close, go on anyway: Step 5 removes everything it can, and Step 6 tells you whether a restart is needed.
+This step changes nothing. It opens each file in the folders that Step 1 checks for exclusive use, without reading or writing anything, and closes it again at once. A file that cannot be opened this way is still in use. Paste or run the whole block at once.
+
+```powershell
+& {
+    $moduleRoot = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules\AzStackHci.EnvironmentChecker'
+    $folders = @(Get-ChildItem -Path $moduleRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -as [version] } | ForEach-Object { $_.FullName }) +
+        @(Get-Module -Name 'AzStackHci.EnvironmentChecker' -ListAvailable | Where-Object { $_.Path -like "*$($_.Version)*" } | ForEach-Object { $_.ModuleBase })
+    $files = @($folders | Sort-Object -Unique |
+        ForEach-Object { Get-ChildItem -LiteralPath $_ -Recurse -File -Force -ErrorAction SilentlyContinue } |
+        ForEach-Object { $_.FullName } | Sort-Object -Unique)
+    $inUse = @()
+    $checkError = $null
+    foreach ($file in $files) {
+        try {
+            $stream = [System.IO.File]::Open($file, 'Open', 'ReadWrite', 'None')
+            $stream.Close()
+        }
+        catch [System.IO.IOException] { if (Test-Path -LiteralPath $file) { $inUse += $file } }
+        catch [System.UnauthorizedAccessException] { $inUse += $file }
+        catch { $checkError = $_.Exception.Message; break }
+    }
+    if ($checkError) {
+        Write-Output 'LOCK_CHECK_UNAVAILABLE'
+        Write-Output "The check could not run in this PowerShell session: $checkError"
+    }
+    elseif ($files.Count -eq 0) {
+        Write-Output 'NO_FILES_TO_CHECK'
+        Write-Output "This machine has no files in the external copy's folders."
+    }
+    elseif ($inUse.Count -gt 0) {
+        Write-Output 'FILES_IN_USE'
+        $inUse | ForEach-Object { "In use: $_" }
+        Write-Output 'Run the Step 1 script again to see which processes hold these files.'
+    }
+    else {
+        Write-Output 'FILES_RELEASED'
+        Write-Output "No file in the external copy's folders is in use ($($files.Count) files checked)."
+    }
+}
+```
+
+| Result | Meaning | Next step |
+| --- | --- | --- |
+| `FILES_RELEASED` | No file of the external copy is in use on this machine. | Go to Step 5. |
+| `FILES_IN_USE` | The script lists the files that are still in use. | Run Step 1 again to see which processes hold them. If it marks a process `Step 2 stops it.`, run Step 2 and then this step again. If it lists a process that you can close, close it as Step 3 describes and run this step again. If it lists only processes that you cannot close, go to Step 5 anyway: it removes everything it can, and Step 6 tells you whether a restart is needed. |
+| `NO_FILES_TO_CHECK` | This machine has no files in the external copy's folders. | Go to Step 5. |
+| `LOCK_CHECK_UNAVAILABLE` | The check could not run in this PowerShell session. | Go to Step 5. |
 
 ### Step 5: Run the cleanup script
 
@@ -509,7 +710,12 @@ This step changes nothing. A restart is needed only in the rare case where Step 
 | `RESTART_REQUIRED` | The external copy is still listed, and only a restart releases the files that hold it. Until the restart, Step 7 deletes nothing and the retry script retries nothing. | Restart the machine as the script prints. |
 | `CLUSTER_STATE_UNKNOWN` | Printed after `RESTART_REQUIRED`. `Get-ClusterNode` failed or returned no machines, and the script could not confirm that the Cluster service is not installed or that the machine has no cluster database, so it could not tell how to restart it safely. The line after it shows the reason. | Do not restart yet. Check in the Azure portal or in Failover Cluster Manager on another machine whether this machine is in a cluster. If it is one of several machines, [pause and drain it](https://learn.microsoft.com/azure/azure-local/manage/suspend-resume-cluster-maintenance) before the restart. If it is the only machine, plan a maintenance window and shut down or save its VMs first. After the restart, run Steps 5, 6, and 7 again. |
 
-If you restart the machine: **Changes:** restarts this machine and ends every program on it. In a cluster, pausing and draining the machine first moves its VMs to the other machines. **[HIGH RISK]** On a single-machine instance, the restart stops all running VMs until the machine is back.
+If you restart the machine: **Changes:** restarts this machine and ends every program on it. In a cluster, pausing and draining the machine first moves its VMs to the other machines.
+
+**Plan for:** on a single-machine instance, a maintenance window, because there is no other machine to drain to.
+
+> [!WARNING]
+> On a single-machine instance, this restart stops all running VMs.
 
 ### Step 7: Delete leftover folders
 
@@ -618,7 +824,7 @@ Do not use the system health check to confirm this fix. It can keep showing a pr
 
 ## Retry the failed operation
 
-Run this script on one machine, after [Verify the fix](#verify-the-fix) printed `ALL_MACHINES_CLEAN`, or printed `THIS_MACHINE_CLEAN` on every machine. It first checks this machine and every other machine that it can reach, the same way as Verify the fix, and it retries nothing if one of them is not clean. A machine that it cannot reach does not stop the retry, so run Verify the fix on each such machine first. It then resumes a solution update whose installation failed with the error in this article. For any other operation, it prints how to retry it. Paste or run the whole block at once.
+Run this script on one machine, after [Verify the fix](#verify-the-fix) printed `ALL_MACHINES_CLEAN`, or printed `THIS_MACHINE_CLEAN` on every machine. It first checks this machine and every other machine that it can reach, the same way as Verify the fix, and it retries nothing if one of them is not clean. A machine that it cannot reach does not stop the retry, so run Verify the fix on each such machine first. It then resumes a solution update whose installation failed with the error in this article. For any other operation, it prints how to retry it. Paste or run the whole block at once. To retry a solution update by hand instead, select **Try again** on the failed update in the Azure portal, or run `Get-SolutionUpdate | Where-Object Version -eq "<version>" | Start-SolutionUpdate`, replacing `<version>` with the version of the update that failed. This works whether the update failed in the readiness check (`HealthCheckFailed`) or during installation. If you ran the readiness check with `Start-SolutionUpdate -PrepareOnly`, retry in PowerShell, not in the Azure portal.
 
 **Changes:** resumes the update only when this machine and every machine that the script can reach are clean, no update is downloading, preparing, installing, or running health checks, and exactly one update is in the `InstallationFailed` state with the error from [Symptoms](#symptoms) in a failed step of its last run. The update continues from the step that failed. In every other case the script changes nothing.
 
@@ -754,7 +960,11 @@ Run this script on one machine, after [Verify the fix](#verify-the-fix) printed 
                 Write-Output "More than one update is in the InstallationFailed state, so none was resumed."
             } else {
                 Write-Output "NO_UPDATE_TO_RESUME"
-                Write-Output "No solution update failed during installation. Retry the operation that failed the same way you started it. An update that shows HealthCheckFailed failed in its readiness check: select Try again on it, or run the same Start-SolutionUpdate command again."
+                Write-Output "No solution update failed during installation. Retry the operation that failed the same way you started it."
+                foreach ($other in @($updates | Where-Object { "$($_.State)" -like '*Failed' })) {
+                    "$($other.DisplayName) is $($other.State). To retry it, run: Get-SolutionUpdate | Where-Object Version -eq `"$($other.Version)`" | Start-SolutionUpdate"
+                    "  Add -PrepareOnly if you ran only its readiness check with -PrepareOnly. If you started it in the Azure portal, you can instead select Try again on it there."
+                }
             }
             $notCheckedLines
             try { Get-SolutionUpdate -ErrorAction Stop 4>$null | Format-Table DisplayName, Version, State -AutoSize } catch { }
@@ -770,7 +980,7 @@ Run this script on one machine, after [Verify the fix](#verify-the-fix) printed 
 | `HEALTH_CHECK_STATE_UNKNOWN` | The failed update shows the error from [Symptoms](#symptoms), but the script could not read whether the system health check is running, so it resumed nothing. The line after it shows the reason. | Run this script again in a few minutes. If it keeps printing this, open **Updates** for your Azure Local instance, and when no health check is running and the failed update shows the error from [Symptoms](#symptoms), select **Try again**. |
 | `UPDATE_FAILED_FOR_OTHER_REASON` | No failed step in the failed update's last run shows the error from [Symptoms](#symptoms), or its error could not be read, so the script did not resume it. | Check the error under **Updates**. If it is the error from [Symptoms](#symptoms), select **Try again**. Otherwise, see [Troubleshoot solution updates for Azure Local](https://learn.microsoft.com/azure/azure-local/update/update-troubleshooting-23h2). |
 | `WINDOWS_POWERSHELL_REQUIRED` | The script ran in PowerShell 7 and did nothing. | Run it in Windows PowerShell 5.1. |
-| `NO_UPDATE_TO_RESUME` | No solution update failed during installation, so nothing was resumed. The script prints how to retry other operations, including an update that failed in its readiness check (`HealthCheckFailed`). | Retry the operation that failed the same way you started it. If you started a readiness check with `Start-SolutionUpdate -PrepareOnly`, use the same command again. |
+| `NO_UPDATE_TO_RESUME` | No solution update failed during installation, so nothing was resumed. For each update in another failed state, for example `HealthCheckFailed` after its readiness check failed, the script prints the command that retries it. | Retry the operation that failed the same way you started it. For a solution update, run the command the script printed: `Get-SolutionUpdate \| Where-Object Version -eq "<version>" \| Start-SolutionUpdate`. This works whether the update failed in the readiness check or during installation. If you ran only its readiness check with `Start-SolutionUpdate -PrepareOnly`, add `-PrepareOnly` to run only the check again, and do not continue in the Azure portal. If you started the update in the Azure portal, you can instead select **Try again** there. |
 | `CLUSTER_NOT_DEPLOYED` | The cluster does not exist yet, so the failed operation is a deployment. Only this machine was checked. | Confirm with [Verify the fix](#verify-the-fix) that every machine prints `THIS_MACHINE_CLEAN`, then resume the deployment as described in [Resume deployment](https://learn.microsoft.com/azure/azure-local/deploy/deploy-via-portal#resume-deployment). |
 | `UPDATE_SERVICE_NOT_AVAILABLE` | The cluster exists, but the solution update service did not answer. This can happen when a deployment failed after the cluster was created. | For a deployment, see [Resume deployment](https://learn.microsoft.com/azure/azure-local/deploy/deploy-via-portal#resume-deployment). On a deployed system, see [Troubleshoot solution updates for Azure Local](https://learn.microsoft.com/azure/azure-local/update/update-troubleshooting-23h2). |
 | `UPDATE_CHECK_BUSY` | Another machine was reading or starting the update at the same moment, for example because this script runs on several machines at once, and the update service was still busy after three tries within about a minute. Nothing was retried on this machine. | Run this script again in a minute. |
@@ -780,7 +990,7 @@ Run this script on one machine, after [Verify the fix](#verify-the-fix) printed 
 
 ## Rollback
 
-Normally there is nothing to roll back. Azure Local needs only the inbox module, so a copy you removed does not need to be put back. If you need the standalone Environment Checker from the PowerShell Gallery again, install it only after the operation completes, and remove it again before the next one, as described in [Prevention](#prevention). If you paused and drained a machine, resume it as described in the pause and drain procedure. Sessions that Step 2 stopped and programs that you closed in Step 3 cannot be restored; start them again if you still need them.
+Normally there is nothing to roll back. Azure Local needs only the inbox module, so a copy you removed does not need to be put back. If you need the standalone Environment Checker from the PowerShell Gallery again, install it only after the operation completes, and remove it again before the next one, as described in [Prevention](#prevention). If you paused and drained a machine, resume it as described in the pause and drain procedure. Sessions that Step 2 stopped and programs that you closed in Step 3 cannot be restored; start them again if you still need them. If you stopped after Step 1, delete `C:\ProgramData\AzStackHci.EnvironmentChecker.Step1List.json` if it is still there; Step 2 never uses a list older than 60 minutes.
 
 ## When to contact Microsoft support
 
