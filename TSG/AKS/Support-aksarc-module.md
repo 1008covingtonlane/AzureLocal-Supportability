@@ -115,7 +115,7 @@ The output ends with a summary line, followed by a table that lists each test wi
 
 ### Test for issues with remediation
 
-Run this command only when the test above reported a `Failed` or `Error` test, or the `Critical Test` error. It reruns every test and fixes only the tests that don't pass. On a three-machine instance with one failed test, it took about 75 seconds; the time depends on the fixes it applies.
+Run this only when the test above reported a `Failed` or `Error` test, or the `Critical Test` error. First check whether the module's fix would remove VMs, and then run the block that fixes the failed tests. The block never removes VMs. On a three-machine instance with one failed test, it took about 75 seconds; the time depends on the fixes it applies.
 
 **Changes:** depending on the failing test, the fix can:
 
@@ -124,16 +124,16 @@ Run this command only when the test above reported a `Failed` or `Error` test, o
 - delete stale MOC working folders, and reset MOC PowerShell settings to the standard Azure Local values;
 - re-create the MOC PowerShell registry setting or the cloud agent cluster affinity rule `Cloud Agent-CNO`;
 - start the Windows Event Log service;
-- remove gallery images that failed to delete, and stop and remove VMs that failed to delete because their OS disk was in use, along with any other VM whose name contains one of their names.
+- remove gallery images that failed to delete.
 
-It doesn't restart the Failover Cluster service or the Hyper-V Virtual Machine Management service.
+It doesn't restart the Failover Cluster service or the Hyper-V Virtual Machine Management service. The module's fix for the test `Validate Virtual Machine Stuck In Deleting Due To OS Disk Lock` stops and removes VMs. The block below never runs it; it runs only from [If the fix would remove VMs](#if-the-fix-would-remove-vms), after the owner of the VMs approves.
 
-**Plan for:** Azure Local VM and AKS Arc management operations, such as creating, changing, or deleting a VM, can fail while MOC agents restart or MOC updates. Apart from the VM removal described in the warning below, the fixes work on the MOC infrastructure, not on running VMs. Machines that are Down or Paused aren't fixed. Run the command in a maintenance window.
+**Plan for:** Azure Local VM and AKS Arc management operations, such as creating, changing, or deleting a VM, can fail while MOC agents restart or MOC updates. The fixes work on the MOC infrastructure, not on running VMs. Machines that are Down or Paused aren't fixed. Run the block in a maintenance window.
 
 > [!WARNING]
-> **[HIGH RISK]** The module doesn't undo its fixes, and there is no rollback. An MOC update stays in place. If the test `Validate Virtual Machine Stuck In Deleting Due To OS Disk Lock` failed, the fix stops and removes every VM that its message lists. It finds those VMs by matching part of the name, so it also stops and removes any other VM whose cluster role or Hyper-V name contains a listed VM's name. A removed VM can't be recovered. Run the check below first, and don't run the command if it shows a VM you don't intend to remove.
+> **[HIGH RISK]** The module doesn't undo its fixes, and there is no rollback. An MOC update, renewed MOC identities and certificates, and deleted MOC working folders stay as they are. If you aren't sure the failed tests are the problem you're troubleshooting, contact Microsoft Support before you run the block.
 
-First, check whether the fix would remove VMs. This check runs only that test and changes nothing:
+First, check whether the module's fix would remove VMs. This check runs only that test and changes nothing:
 
 ```powershell
 $vmTest = @(Test-SupportAksArcKnownIssues -TestId MOC-0017)
@@ -142,47 +142,58 @@ elseif (@($vmTest | Where-Object { $_.Status -in 'Failed', 'Error' }).Count -gt 
 else { 'NO-VM-REMOVAL' }
 ```
 
-- `NO-VM-REMOVAL`: the fix would remove no VMs. Run the command below right away, in the same window. If time has passed since this check, run the check again first, and run the command only if it still prints `NO-VM-REMOVAL`.
-- `VM-REMOVAL-PENDING`: the command below would stop and remove the VMs that the message lists, and any other VM whose name contains one of those names. Don't run it yet. Follow [If the fix would remove VMs](#if-the-fix-would-remove-vms).
+- `NO-VM-REMOVAL`: the fix would remove no VMs. Run the block below.
+- `VM-REMOVAL-PENDING`: the module's fix would stop and remove the VMs that the message lists, and any other VM whose name contains one of those names. Run the block below, which fixes every other failed test and never removes VMs, and follow [If the fix would remove VMs](#if-the-fix-would-remove-vms) for the VM removal.
 - `TEST-DID-NOT-RUN`: the test ran no checks. Use the results table above to find out why.
 
-Run this command only after the check printed `NO-VM-REMOVAL`. If it printed `VM-REMOVAL-PENDING`, run the command from [Run the fix after the owner approves](#run-the-fix-after-the-owner-approves) instead, right after the list is checked again.
+Run this block whatever the check printed. It fixes every failed test except `Validate Virtual Machine Stuck In Deleting Due To OS Disk Lock`, which removes VMs and is left to [If the fix would remove VMs](#if-the-fix-would-remove-vms). It runs the test and reads each test's ID from its `Running test: <test name> with ID: <ID>` line. Then it runs the remediation for each test that failed, had an error, or stopped the run as a critical test, except `MOC-0017`. A critical test that fails stops the test run, so the tests after it don't run. After the block fixes that test, it runs the test again, for at most 4 passes. While it runs, it prints:
 
-```powershell
-if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Run this command in Windows PowerShell 5.1 (powershell.exe), not PowerShell 7.' }
-Invoke-SupportAksArcRemediation
-
-```
-
-For each test, the command prints either `No remediation required for <test>.`, or `Remediation for <test> is required.` and then `Remediation for <test> succeeded.` or the warning `Remediation for <test> failed.` Two tests have no automatic fix; see [If a test has no automatic fix](#if-a-test-has-no-automatic-fix).
-
-If the check printed `VM-REMOVAL-PENDING` and you didn't run the command, run this block instead. It fixes every failed test except `Validate Virtual Machine Stuck In Deleting Due To OS Disk Lock`, which removes VMs. It runs the test and reads each test's ID from its `Running test: <test name> with ID: <ID>` line. Then it runs the remediation for each test that failed, had an error, or stopped the run as a critical test, except `MOC-0017`. It prints:
-
+- `REMEDIATION-PASS <n>` at the start of each pass;
+- `CRITICAL-STOP <ID>` if a critical test stopped that pass;
 - `REMEDIATE <ID>` before each fix;
 - `SKIPPED MOC-0017` if it left that test alone;
-- `NO-FAILED-TESTS` if no test needed a fix;
-- `TEST-DID-NOT-RUN` if the test ran no checks. Use the results table above to find out why.
+- `NO-FAILED-TESTS` if the pass found no test to fix.
 
-If a critical test stopped the run, the tests after it didn't run, so this block can't fix them yet. The verify step shows whether any of them failed.
+For each fix, the module prints either `No remediation required for <test>.`, or `Remediation for <test> is required.` and then `Remediation for <test> succeeded.` or the warning `Remediation for <test> failed.` Two tests have no automatic fix; see [If a test has no automatic fix](#if-a-test-has-no-automatic-fix).
+
+Its last line is one of these results:
+
+- `REMEDIATION-PASSES-DONE Passes=<n>`: the last pass ran every test, and the block ran the fixes. Continue with [If a test has no automatic fix](#if-a-test-has-no-automatic-fix).
+- `CRITICAL-STOP-NO-AUTOFIX FC-0011`: the Failover Cluster test stopped the run. It has no automatic fix, so the block fixed nothing. Continue with [If a test has no automatic fix](#if-a-test-has-no-automatic-fix) to bring the machine back first, and then run this block again.
+- `CRITICAL-STOP-REPEATED <ID>`: the same critical test stopped two passes in a row, so its fix didn't work. Don't run the block again. Contact Microsoft Support.
+- `REMEDIATION-PASS-LIMIT <ID>`: a critical test still stopped the run after 4 passes. Contact Microsoft Support.
+- `TEST-DID-NOT-RUN`: the test ran no checks. Use the results table above to find out why.
+- `REMEDIATION-ERROR`: the test or a fix stopped with the error shown. Fix the reason shown, and run the block again. If the same error comes back, contact Microsoft Support.
 
 **Changes:** applies the fixes listed above for the failed tests only, one test at a time. It never runs the fix that removes VMs, but it can still update MOC and restart MOC agents.
 
-> [!WARNING]
-> **[HIGH RISK]** This block can't be undone either. An MOC update, renewed MOC identities and certificates, and deleted MOC working folders stay as they are; there is no rollback. If you aren't sure the failed tests are the problem you're troubleshooting, contact Microsoft Support before you run it.
-
 ```powershell
 if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Run this command in Windows PowerShell 5.1 (powershell.exe), not PowerShell 7.' }
-$info = $null
-$results = @(Test-SupportAksArcKnownIssues -InformationVariable info)
-$ids = @($info | ForEach-Object { [regex]::Match([string]$_.MessageData, '^Running test: .+ with ID: ((MOC|FC|VMMS)-\d{4})$') } | Where-Object { $_.Success } | ForEach-Object { $_.Groups[1].Value })
-$failed = @(for ($i = 0; $i -lt $ids.Count; $i++) { if ($i -ge $results.Count -or $results[$i].Status -in 'Failed', 'Error') { $ids[$i] } })
-if ($ids.Count -eq 0) { 'TEST-DID-NOT-RUN' }
-elseif ($failed.Count -eq 0) { 'NO-FAILED-TESTS' }
-foreach ($id in $failed) {
-    if ($id -eq 'MOC-0017') { 'SKIPPED MOC-0017'; continue }
-    "REMEDIATE $id"
-    Invoke-SupportAksArcRemediation -TestId $id
-}
+$final = $null; $lastStop = $null; $pass = 0
+try {
+    while (-not $final) {
+        if ($pass -ge 4) { $final = "REMEDIATION-PASS-LIMIT $lastStop"; break }
+        $pass++
+        "REMEDIATION-PASS $pass"
+        $info = $null
+        $results = @(Test-SupportAksArcKnownIssues -InformationVariable info)
+        $ids = @($info | ForEach-Object { [regex]::Match([string]$_.MessageData, '^Running test: .+ with ID: ((MOC|FC|VMMS)-\d{4})$') } | Where-Object { $_.Success } | ForEach-Object { $_.Groups[1].Value })
+        if ($ids.Count -eq 0) { $final = 'TEST-DID-NOT-RUN'; break }
+        $stop = $null
+        if ($results.Count -lt $ids.Count) { $stop = $ids[$ids.Count - 1]; "CRITICAL-STOP $stop" }
+        if ($stop -eq 'FC-0011') { $final = 'CRITICAL-STOP-NO-AUTOFIX FC-0011'; break }
+        if ($stop -and $stop -eq $lastStop) { $final = "CRITICAL-STOP-REPEATED $stop"; break }
+        $failed = @(for ($i = 0; $i -lt $ids.Count; $i++) { if ($i -ge $results.Count -or $results[$i].Status -in 'Failed', 'Error') { $ids[$i] } })
+        if ($failed.Count -eq 0) { 'NO-FAILED-TESTS' }
+        foreach ($id in $failed) {
+            if ($id -eq 'MOC-0017') { 'SKIPPED MOC-0017'; continue }
+            "REMEDIATE $id"
+            Invoke-SupportAksArcRemediation -TestId $id
+        }
+        if ($stop) { $lastStop = $stop } else { $final = "REMEDIATION-PASSES-DONE Passes=$pass" }
+    }
+} catch { $final = "REMEDIATION-ERROR: $($_.Exception.Message)" }
+$final
 ```
 
 #### If the fix would remove VMs
@@ -224,10 +235,10 @@ if ($shownVmList.Complete) { 'VM-LIST-COMPLETE' } else { 'VM-LIST-INCOMPLETE' }
 
 - If it prints `NO-VM-REMOVAL-PENDING` and then `VM-LIST-COMPLETE`, the fix would now remove no VMs, and there is nothing for the owner to confirm. Continue with [Run the fix after the owner approves](#run-the-fix-after-the-owner-approves), which saves the empty list and checks it again just before the command.
 - If the last line is `VM-LIST-COMPLETE` and it lists VMs, the owner reviews the list as described below.
-- If the last line is `VM-LIST-INCOMPLETE`, the list is missing at least one machine: a `NOT CHECKED` line names the machine it couldn't query, or another `VM-LIST-ERROR` line shows why the check stopped. Don't run the command in [Test for issues with remediation](#test-for-issues-with-remediation), and don't approve removing any VM, until every machine is checked. Fix the reason shown, for example Hyper-V access to that machine, and run this check again.
-- If any VM it lists isn't one you intend to remove, or you aren't sure, stop. Don't run the command in [Test for issues with remediation](#test-for-issues-with-remediation). Contact Microsoft Support before you remove any VM. You can still run the block that skips that test, in [Test for issues with remediation](#test-for-issues-with-remediation), to fix the other failed tests.
+- If the last line is `VM-LIST-INCOMPLETE`, the list is missing at least one machine: a `NOT CHECKED` line names the machine it couldn't query, or another `VM-LIST-ERROR` line shows why the check stopped. Don't run the command in [Run the fix after the owner approves](#run-the-fix-after-the-owner-approves), and don't approve removing any VM, until every machine is checked. Fix the reason shown, for example Hyper-V access to that machine, and run this check again.
+- If any VM it lists isn't one you intend to remove, or you aren't sure, stop. Don't run the command in [Run the fix after the owner approves](#run-the-fix-after-the-owner-approves). Contact Microsoft Support before you remove any VM. The block in [Test for issues with remediation](#test-for-issues-with-remediation) fixes the other failed tests without removing VMs.
 
-**Stop here and confirm.** Before anyone runs the remediation command, the owner of the VMs reviews the list this check printed and decides whether every VM on it can be removed. Done looks like: the last line is `VM-LIST-COMPLETE`, and the owner has confirmed by name that each listed VM can be removed. Then continue with [Run the fix after the owner approves](#run-the-fix-after-the-owner-approves).
+**Stop here and confirm.** Before anyone runs the command in [Run the fix after the owner approves](#run-the-fix-after-the-owner-approves), the owner of the VMs reviews the list this check printed and decides whether every VM on it can be removed. Done looks like: the last line is `VM-LIST-COMPLETE`, and the owner has confirmed by name that each listed VM can be removed. Then continue with [Run the fix after the owner approves](#run-the-fix-after-the-owner-approves).
 
 ##### Run the fix after the owner approves
 
@@ -269,7 +280,7 @@ try {
 - `VM-LIST-CHANGED`: a `NEW` line is a VM the command would now remove that the owner didn't approve, and a `GONE` line is an approved VM it no longer matches. Don't run the command below. Run the check in [If the fix would remove VMs](#if-the-fix-would-remove-vms) again, and get a new approval.
 - `VM-LIST-RECHECK-ERROR`: the check couldn't list every VM. Don't run the command below. Fix the reason shown, and run this check again.
 
-If you don't get a new approval, you can still run the block that skips that test, in [Test for issues with remediation](#test-for-issues-with-remediation), to fix the other failed tests.
+If you don't get a new approval, don't run the command. The block in [Test for issues with remediation](#test-for-issues-with-remediation) fixes the other failed tests without removing VMs.
 
 The command runs only right after this check printed `VM-LIST-UNCHANGED` in the same window; otherwise it stops with an error and changes nothing:
 
