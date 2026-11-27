@@ -100,7 +100,7 @@ The test takes about a minute on a three-machine instance. Version 1.3.164 of th
 - VMs and gallery images that failed to delete, and the user storage containers;
 - the Windows Event Log service.
 
-It only reports what it finds. It doesn't fix anything. Machines that are Down or Paused aren't checked. While it runs, it also prints many `VERBOSE:` progress lines. They're expected.
+It only reports what it finds. It doesn't fix anything. Most tests skip machines that are Down or Paused. The Failover Cluster and Hyper-V Virtual Machine Management service tests check every machine in the cluster, so a machine that is Down makes the Failover Cluster test fail and stops the run with the `Critical Test` error. Bring that machine back Up, or find out why it's Down, before you act on the results. While it runs, it also prints many `VERBOSE:` progress lines. They're expected.
 
 The output ends with a summary line, followed by a table that lists each test with its `TestName`, its `Status`, and a `Message`. For example output, see [Use the Support tool to troubleshoot and fix Azure Local infrastructure problems](https://learn.microsoft.com/azure/azure-local/manage/remediate-support-tool-infrastructure). Use this table to decide what to do next:
 
@@ -131,7 +131,7 @@ It doesn't restart the Failover Cluster service or the Hyper-V Virtual Machine M
 **Plan for:** Azure Local VM and AKS Arc management operations, such as creating, changing, or deleting a VM, can fail while MOC agents restart or MOC updates. Apart from removing VMs that failed to delete, the fixes work on the MOC infrastructure, not on running VMs. Machines that are Down or Paused aren't fixed. Run the command in a maintenance window.
 
 > [!WARNING]
-> The module doesn't undo its fixes. An MOC update stays in place. If the test `Validate Virtual Machine Stuck In Deleting Due To OS Disk Lock` failed, the fix stops and removes every VM that its message lists.
+> The module doesn't undo its fixes. An MOC update stays in place. If the test `Validate Virtual Machine Stuck In Deleting Due To OS Disk Lock` failed, the fix stops and removes every VM that its message lists. It finds those VMs by matching part of the name, so it also stops and removes any other VM whose cluster role or Hyper-V name contains a listed VM's name.
 
 First, check whether the fix would remove VMs. This check runs only that test and changes nothing:
 
@@ -143,7 +143,7 @@ else { 'NO-VM-REMOVAL' }
 ```
 
 - `NO-VM-REMOVAL`: run the command below.
-- `VM-REMOVAL-PENDING`: the command below would stop and remove the VMs that the message lists. Run the block that skips that test, after the command below, instead.
+- `VM-REMOVAL-PENDING`: the command below would stop and remove the VMs that the message lists, and any other VM whose name contains one of those names. Run the block that skips that test, after the command below, instead.
 - `TEST-DID-NOT-RUN`: the test ran no checks. Use the results table above to find out why.
 
 ```powershell
@@ -160,6 +160,8 @@ If the check printed `VM-REMOVAL-PENDING`, run this block instead of the command
 - `SKIPPED MOC-0017` if it left that test alone;
 - `NO-FAILED-TESTS` if no test needed a fix;
 - `TEST-DID-NOT-RUN` if the test ran no checks. Use the results table above to find out why.
+
+If a critical test stopped the run, the tests after it didn't run, so this block can't fix them yet. The verify step shows whether any of them failed.
 
 **Changes:** applies the fixes listed above for the failed tests only, one test at a time, and never removes VMs.
 
@@ -213,7 +215,7 @@ $failed | Format-Table TestName, Status, Message -AutoSize
 "Tests run: $($results.Count). Failed or error: $($failed.Count)."
 ```
 
-The fix worked when no test is listed, no error is shown, and the last line shows `Failed or error: 0` with a test count above 0, for example `Tests run: 23. Failed or error: 0.` `Tests run: 0` means an error stopped the run. A `Warning` test isn't listed; handle it as described in the results table. If any test is listed, or an error remains, see [Support](#support).
+The fix worked when no test is listed, no error is shown, and the last line shows `Failed or error: 0` with a test count above 0, for example `Tests run: 23. Failed or error: 0.` `Tests run: 0` means an error stopped the run. A `Warning` test isn't listed; handle it as described in the results table. If any test is listed, or an error remains, go back to [Test for issues with remediation](#test-for-issues-with-remediation) once, starting with the check for VM removal. If a test is still listed after that, see [Support](#support).
 
 
 ## Support
