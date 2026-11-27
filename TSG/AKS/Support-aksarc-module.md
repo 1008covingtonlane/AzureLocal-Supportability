@@ -366,13 +366,22 @@ else { 'NO-MANUAL-RESTART' }
 
    Restart the machine only if this prints `ROLES-MOVED`. `ROLES-NOT-MOVED` lists the roles that didn't move, and `FAILOVER-CHECK-ERROR` means the instance couldn't be queried, so the check couldn't confirm that the VMs moved. In both cases, don't restart the machine. Contact Microsoft Support.
 
-3. **Operator action.** An administrator turns on or restarts the machine from its BMC or at the machine, only after step 2 shows that it's off or unresponsive and, on an instance with more than one machine, that its VMs moved. Done looks like: step 4 shows the machine `Up` or `Paused`.
+3. **Operator action.** An administrator turns on or restarts the machine from its BMC or at the machine, only after step 2 shows that it's off or unresponsive and, on an instance with more than one machine, that its VMs moved. Done looks like: step 4 prints `MACHINE-UP-OR-PAUSED`.
 
-4. Run this on any machine that is `Up` (on a single-machine instance, on that machine), until the machine shows `Up` or `Paused`:
+4. Replace `MACHINE-NAME` with the machine's name, and run this on any machine that is `Up` (on a single-machine instance, on that machine), until the machine shows `Up` or `Paused`. It changes nothing:
 
    ```powershell
-   Get-ClusterNode | Format-Table Name, State
+   $machine = 'MACHINE-NAME'
+   try {
+       if ($machine -eq 'MACHINE-NAME') { throw 'Replace MACHINE-NAME with the machine name.' }
+       $state = [string](Get-ClusterNode -Name $machine -ErrorAction Stop).State
+       if ($state -in 'Up', 'Paused') { "MACHINE-UP-OR-PAUSED State=$state" } else { "MACHINE-NOT-YET-UP State=$state" }
+   } catch { "NODE-CHECK-ERROR: $($_.Exception.Message)" }
    ```
+
+   - `MACHINE-UP-OR-PAUSED`: the machine is back in the instance. Go to step 5.
+   - `MACHINE-NOT-YET-UP`: the machine isn't back yet. Wait a few minutes and run the check again. If it stays in this state, contact Microsoft Support.
+   - `NODE-CHECK-ERROR`: the machine name isn't a machine in this instance, or the instance couldn't be queried yet. Fix the name, or wait a few minutes, and run the check again.
 
 5. If the machine shows `Paused`, resume it with `Resume-ClusterNode -Name` followed by the machine name.
 6. Run the check in [If a test has no automatic fix](#if-a-test-has-no-automatic-fix) again.
