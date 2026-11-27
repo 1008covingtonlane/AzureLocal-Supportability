@@ -53,6 +53,34 @@
   </tr>
 </table>
 
+## Table of contents
+
+- [At a glance](#at-a-glance)
+- [Find where to start](#find-where-to-start)
+- [Scope and support boundary](#scope-and-support-boundary)
+- [Where to observe this change](#where-to-observe-this-change)
+- [Transport requirements](#transport-requirements)
+- [Prerequisites](#prerequisites)
+- [Change-control checkpoints](#change-control-checkpoints)
+- [Glossary](#glossary)
+- [Prepare variables and evidence storage](#prepare-variables-and-evidence-storage)
+- [Capture and seal the current configuration](#capture-and-seal-the-current-configuration)
+- [Seal storage and platform resource identities](#seal-storage-and-platform-resource-identities)
+- [Resume safely after a PowerShell, remoting, or operator-session loss](#resume-safely-after-a-powershell-remoting-or-operator-session-loss)
+- [Quiesce workloads and the platform](#quiesce-workloads-and-the-platform)
+- [Offline CSVs and the Storage Spaces Direct pool](#offline-csvs-and-the-storage-spaces-direct-pool)
+- [Change the Network ATC transport](#change-the-network-atc-transport)
+- [Restore the platform in dependency order](#restore-the-platform-in-dependency-order)
+- [Hold a clean platform state](#hold-a-clean-platform-state)
+- [Return workload startup to the application owner](#return-workload-startup-to-the-application-owner)
+- [Validate active RDMA under representative load](#validate-active-rdma-under-representative-load)
+- [Abandon the change before the platform is quiesced](#abandon-the-change-before-the-platform-is-quiesced)
+- [Rollback](#rollback)
+- [Troubleshooting and stop conditions](#troubleshooting-and-stop-conditions)
+- [Evidence and escalation package](#evidence-and-escalation-package)
+- [Success criteria](#success-criteria)
+- [References](#references)
+
 ## At a glance
 
 > [!WARNING]
@@ -74,6 +102,20 @@ The safe dependency order is:
 12. Validate the target transport under an approved representative workload.
 
 Rollback uses the same quiesce and recovery sequence with the original transport as the target.
+
+## Find where to start
+
+This guide is long. Use this table to go straight to the section that matches your situation.
+
+| If you are here because | Go to |
+| --- | --- |
+| You are starting a new change | Read [Scope and support boundary](#scope-and-support-boundary), [Prerequisites](#prerequisites), and [Change-control checkpoints](#change-control-checkpoints), then begin at [Prepare variables and evidence storage](#prepare-variables-and-evidence-storage). |
+| Your PowerShell session, remoting session, or operator hand-off was interrupted | [Resume safely after a PowerShell, remoting, or operator-session loss](#resume-safely-after-a-powershell-remoting-or-operator-session-loss). Its table maps each recorded phase to the next action. |
+| You want to stop the change and the recorded phase is still `Initialized`, `BaselineSealed`, or `WorkloadsOff` | [Abandon the change before the platform is quiesced](#abandon-the-change-before-the-platform-is-quiesced). From `PlatformOff` onward, do not abandon. |
+| The change approver decided to roll back and the recorded phase is `TargetReadbackVerified` through `ActiveValidationPassed` | [Rollback](#rollback). If the phase is already `RollbackApproved`, resume as the phase table directs. Between `PlatformOff` and `TargetReadbackVerified`, continue the forward change or contact Microsoft Support. |
+| A check, gate, or recovery step failed, or you need to escalate | [Troubleshooting and stop conditions](#troubleshooting-and-stop-conditions) and [Evidence and escalation package](#evidence-and-escalation-package). |
+
+**Find your current phase.** If you do not know where the change stopped, run the block at the start of [Resume safely after a PowerShell, remoting, or operator-session loss](#resume-safely-after-a-powershell-remoting-or-operator-session-loss). It loads the recorded phase from `phase-state.json` and prints it, and it does not change cluster state. Then follow the row for that phase in the table that comes after the block.
 
 ## Scope and support boundary
 
@@ -1399,8 +1441,11 @@ if ("$($PhaseState.Phase)" -eq 'Initialized') {
         "before the platform is quiesced' to finish cleanup."
     )
 } else {
-    $ExpectedHashes = @(Get-Content -LiteralPath `
-        (Join-Path $EvidenceRoot 'baseline-hashes.json') -Raw | ConvertFrom-Json)
+    # Parse first, then enumerate: Windows PowerShell 5.1 ConvertFrom-Json
+    # emits a JSON array as one pipeline object.
+    $ParsedHashes = Get-Content -LiteralPath `
+        (Join-Path $EvidenceRoot 'baseline-hashes.json') -Raw | ConvertFrom-Json
+    $ExpectedHashes = @($ParsedHashes | ForEach-Object { $_ })
     foreach ($FileName in @('network-atc-baseline.json', 'resource-manifest.json')) {
         $Expected = @($ExpectedHashes | Where-Object {
             (Split-Path -Path "$($_.Path)" -Leaf) -eq $FileName
@@ -1829,7 +1874,7 @@ function Write-MutationFailureEvidence {
 **Risk:** [HIGH RISK]  
 **Owner:** Workload owner
 
-**Operator action.** The workload owner must stop applications and shut down each customer VM through its normal guest operating-system process. Do not use `-TurnOff`, save state, pause, or terminate a VM as the normal path. Done looks like: the following check, which verifies that every clustered VM except the sealed appliance VM is `Off`, prints `WORKLOADS_OFF`.
+**Operator action.** The workload owner must stop applications and shut down each customer VM from inside that VM's guest operating system, through its normal shutdown process. This is done on each VM, not on the cluster node. Do not use `-TurnOff`, save state, pause, or terminate a VM as the normal path. Done looks like: the following check, which verifies that every clustered VM except the sealed appliance VM is `Off`, prints `WORKLOADS_OFF`.
 
 **Paste or run the whole block at once, not line by line.** It runs as one unit so that a failed check stops everything after it. It starts with `. {` so that the variables it sets remain in the session for later steps.
 
@@ -2443,11 +2488,15 @@ if ([string]::IsNullOrWhiteSpace($ApprovedBy) -or $ApprovedBy -match '[<>]') {
     throw "Record the name of the change approver who approved the point of no return."
 }
 
-$PonrSealedHash = @(Get-Content -LiteralPath (
+# Parse first, then enumerate: Windows PowerShell 5.1 ConvertFrom-Json
+# emits a JSON array as one pipeline object.
+$PonrParsedHashes = Get-Content -LiteralPath (
     Join-Path $EvidenceRoot 'baseline-hashes.json'
-) -Raw -ErrorAction Stop | ConvertFrom-Json | Where-Object {
-    (Split-Path -Path "$($_.Path)" -Leaf) -eq 'resource-manifest.json'
-})
+) -Raw -ErrorAction Stop | ConvertFrom-Json
+$PonrSealedHash = @(@($PonrParsedHashes | ForEach-Object { $_ }) |
+    Where-Object {
+        (Split-Path -Path "$($_.Path)" -Leaf) -eq 'resource-manifest.json'
+    })
 $PonrManifestHash = Get-FileHash -Algorithm SHA256 -LiteralPath (
     Join-Path $EvidenceRoot 'resource-manifest.json'
 ) -ErrorAction Stop
@@ -2492,11 +2541,15 @@ if ("$($SubmissionState.Phase)" -eq 'PoolOff') {
     }
     $PonrApproval = Get-Content -LiteralPath $PonrApprovalPath -Raw `
         -ErrorAction Stop | ConvertFrom-Json
-    $PonrSealedHash = @(Get-Content -LiteralPath (
+    # Parse first, then enumerate: Windows PowerShell 5.1 ConvertFrom-Json
+    # emits a JSON array as one pipeline object.
+    $PonrParsedHashes = Get-Content -LiteralPath (
         Join-Path $EvidenceRoot 'baseline-hashes.json'
-    ) -Raw -ErrorAction Stop | ConvertFrom-Json | Where-Object {
-        (Split-Path -Path "$($_.Path)" -Leaf) -eq 'resource-manifest.json'
-    })
+    ) -Raw -ErrorAction Stop | ConvertFrom-Json
+    $PonrSealedHash = @(@($PonrParsedHashes | ForEach-Object { $_ }) |
+        Where-Object {
+            (Split-Path -Path "$($_.Path)" -Leaf) -eq 'resource-manifest.json'
+        })
     $PonrManifestHash = Get-FileHash -Algorithm SHA256 -LiteralPath (
         Join-Path $EvidenceRoot 'resource-manifest.json'
     ) -ErrorAction Stop
@@ -3501,7 +3554,7 @@ if (
 }
 ```
 
-**Operator action.** The application or VM owner decides the startup order and starts the customer workloads that were `Running` when the baseline was sealed. The cluster administrator does not bulk-start VMs without workload-owner approval, and nobody starts a VM that was `Off` at the baseline as part of this change. Done looks like: the following check prints `CUSTOMER_VMS_RESTORED`.
+**Operator action.** The application or VM owner decides the startup order and starts the customer workloads that were `Running` when the baseline was sealed, from their own management machine through their normal startup process, not from this session on the cluster node. The cluster administrator does not bulk-start VMs without workload-owner approval, and nobody starts a VM that was `Off` at the baseline as part of this change. Done looks like: the following check prints `CUSTOMER_VMS_RESTORED`.
 
 The check verifies every recorded customer VM by its sealed VM ID against its sealed
 baseline state. A VM that was `Running` at the baseline must have a running clustered
@@ -3514,11 +3567,15 @@ before it uses the baseline states.
 
 ```powershell
 & {
-$StartupSealedHash = @(Get-Content -LiteralPath (
+# Parse first, then enumerate: Windows PowerShell 5.1 ConvertFrom-Json
+# emits a JSON array as one pipeline object.
+$StartupParsedHashes = Get-Content -LiteralPath (
     Join-Path $EvidenceRoot 'baseline-hashes.json'
-) -Raw | ConvertFrom-Json | Where-Object {
-    (Split-Path -Path "$($_.Path)" -Leaf) -eq 'resource-manifest.json'
-})
+) -Raw -ErrorAction Stop | ConvertFrom-Json
+$StartupSealedHash = @(@($StartupParsedHashes | ForEach-Object { $_ }) |
+    Where-Object {
+        (Split-Path -Path "$($_.Path)" -Leaf) -eq 'resource-manifest.json'
+    })
 $StartupManifestHash = Get-FileHash -Algorithm SHA256 -LiteralPath (
     Join-Path $EvidenceRoot 'resource-manifest.json'
 ) -ErrorAction Stop
@@ -4226,6 +4283,67 @@ if (Test-Path -LiteralPath $ActiveValidationFailurePath) {
     )
 }
 
+# Identify each event exactly, so a disposition covers only the events reviewed.
+function Get-ActiveEventKey {
+    param($EventRecord)
+    $Created = ([datetime]$EventRecord.TimeCreated).ToUniversalTime()
+    (
+        "$("$($EventRecord.MachineName)".ToUpperInvariant())|" +
+        "$($EventRecord.LogName)|$($EventRecord.RecordId)|" +
+        "$($EventRecord.ProviderName)|$($EventRecord.Id)|" +
+        "$($Created.ToString('o'))"
+    )
+}
+
+# Return the event keys from a valid disposition record for this operation and
+# validation window. Refuse a record that was edited, belongs to another
+# operation or checkpoint, or lists an event that the check did not return.
+function Get-DispositionedEventKeys {
+    param([string[]]$ReturnedKeys = @())
+    $RecordPath = Join-Path $EvidenceRoot `
+        "active-validation-$Operation-event-disposition.json"
+    if (-not (Test-Path -LiteralPath $RecordPath)) {
+        return @()
+    }
+    $HashPath = "$RecordPath.sha256"
+    if (-not (Test-Path -LiteralPath $HashPath)) {
+        throw "The event disposition record has no recorded hash. Record the disposition again."
+    }
+    $RecordedHash = "$(Get-Content -LiteralPath $HashPath -Raw -ErrorAction Stop)".Trim()
+    $CurrentHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $RecordPath `
+        -ErrorAction Stop).Hash
+    if ($CurrentHash -ne $RecordedHash) {
+        throw "The event disposition record changed after it was recorded. Record the disposition again."
+    }
+    $Record = Get-Content -LiteralPath $RecordPath -Raw -ErrorAction Stop |
+        ConvertFrom-Json
+    $Keys = @(@($Record.Events) | ForEach-Object { "$($_.Key)" })
+    # PowerShell 7 parses ISO dates in JSON; Windows PowerShell 5.1 does not.
+    $RecordStartUtc = if ($Record.ActiveValidationStartUtc -is [datetime]) {
+        $Record.ActiveValidationStartUtc.ToUniversalTime()
+    } else {
+        [datetime]::Parse(
+            "$($Record.ActiveValidationStartUtc)",
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::RoundtripKind
+        ).ToUniversalTime()
+    }
+    if (
+        "$($Record.ChangeId)" -ne $ChangeId -or
+        "$($Record.Operation)" -ne $Operation -or
+        "$($Record.Phase)" -ne 'ActiveAssertionsPassed' -or
+        $RecordStartUtc -ne $ActiveValidationStartUtc.ToUniversalTime() -or
+        @($Keys | Where-Object { $_ -notin $ReturnedKeys }).Count -gt 0
+    ) {
+        throw (
+            "The event disposition record does not match this operation, " +
+            "checkpoint, and validation window, or lists an event that the " +
+            "check did not return. Record the disposition again."
+        )
+    }
+    $Keys
+}
+
 # Reject cluster and SMB RDMA events from the representative-load window
 $ValidationAttemptId = (
     "$(Get-Date -Format 'yyyyMMdd-HHmmss')-" +
@@ -4246,8 +4364,8 @@ try {
                     Id = 1069, 1135, 1177, 5120, 5142
                     StartTime = $StartTime
                 } -ErrorAction Stop |
-                    Select-Object MachineName, TimeCreated, Id,
-                        LevelDisplayName, Message
+                    Select-Object MachineName, LogName, RecordId,
+                        ProviderName, TimeCreated, Id, LevelDisplayName, Message
             } catch {
                 if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') {
                     throw
@@ -4267,8 +4385,9 @@ try {
                         Where-Object {
                             $_.Level -le 3 -and $_.Message -match 'RDMA'
                         } |
-                        Select-Object MachineName, TimeCreated, Id,
-                            LevelDisplayName, ProviderName, Message
+                        Select-Object MachineName, LogName, RecordId,
+                            TimeCreated, Id, LevelDisplayName, ProviderName,
+                            Message
                 } catch {
                     if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') {
                         throw
@@ -4280,13 +4399,24 @@ try {
         -LiteralPath $ActiveClusterEventPath
     $ActiveSmbRdmaEvents | Export-Csv -NoTypeInformation -NoClobber `
         -LiteralPath $ActiveSmbRdmaEventPath
-    if ($ActiveClusterEvents.Count -gt 0 -or $ActiveSmbRdmaEvents.Count -gt 0) {
+    $DispositionedEventKeys = @(Get-DispositionedEventKeys -ReturnedKeys @(
+        @($ActiveClusterEvents) + @($ActiveSmbRdmaEvents) |
+            ForEach-Object { Get-ActiveEventKey -EventRecord $_ }
+    ))
+    $NewActiveClusterEvents = @($ActiveClusterEvents | Where-Object {
+        (Get-ActiveEventKey -EventRecord $_) -notin $DispositionedEventKeys
+    })
+    $NewActiveSmbRdmaEvents = @($ActiveSmbRdmaEvents | Where-Object {
+        (Get-ActiveEventKey -EventRecord $_) -notin $DispositionedEventKeys
+    })
+    if ($NewActiveClusterEvents.Count -gt 0 -or $NewActiveSmbRdmaEvents.Count -gt 0) {
         $ActiveEventFailureJson = [pscustomobject]@{
             ObservedUtc = (Get-Date).ToUniversalTime().ToString('o')
             Phase = $FinalHoldPhase
             FailureKind = 'ActiveEventValidation'
-            ClusterEventCount = $ActiveClusterEvents.Count
-            SmbRdmaEventCount = $ActiveSmbRdmaEvents.Count
+            ClusterEventCount = $NewActiveClusterEvents.Count
+            SmbRdmaEventCount = $NewActiveSmbRdmaEvents.Count
+            DispositionedEventCount = $DispositionedEventKeys.Count
             ClusterEventEvidence = $ActiveClusterEventPath
             SmbRdmaEventEvidence = $ActiveSmbRdmaEventPath
         } | ConvertTo-Json -Depth 8
@@ -4482,6 +4612,16 @@ do {
                 }
             }
         } -ErrorAction Stop)
+    $FinalHoldDispositionedKeys = @(Get-DispositionedEventKeys -ReturnedKeys @(
+        @($FinalHoldEvents) + @($FinalHoldSmbEvents) |
+            ForEach-Object { Get-ActiveEventKey -EventRecord $_ }
+    ))
+    $FinalHoldNewEvents = @($FinalHoldEvents | Where-Object {
+        (Get-ActiveEventKey -EventRecord $_) -notin $FinalHoldDispositionedKeys
+    })
+    $FinalHoldNewSmbEvents = @($FinalHoldSmbEvents | Where-Object {
+        (Get-ActiveEventKey -EventRecord $_) -notin $FinalHoldDispositionedKeys
+    })
     $FinalHoldEvents | Export-Csv -NoTypeInformation -NoClobber `
         -LiteralPath $FinalHoldClusterEventPath
     $FinalHoldSmbEvents | Export-Csv -NoTypeInformation -NoClobber `
@@ -4542,8 +4682,8 @@ do {
             -not [string]::IsNullOrWhiteSpace("$($_.Error)")
         }).Count -eq 0 -and
         $FinalHoldRdmaHealthy -and
-        $FinalHoldEvents.Count -eq 0 -and
-        $FinalHoldSmbEvents.Count -eq 0
+        $FinalHoldNewEvents.Count -eq 0 -and
+        $FinalHoldNewSmbEvents.Count -eq 0
     )
 
     if ($FinalHealthy) {
@@ -4610,8 +4750,9 @@ do {
                 "$($_.ProvisioningStatus):$($_.RetryCount):$($_.Error)"
             })
             ActiveRdmaHealthy = $FinalHoldRdmaHealthy
-            ClusterEventCount = $FinalHoldEvents.Count
-            SmbRdmaEventCount = $FinalHoldSmbEvents.Count
+            ClusterEventCount = $FinalHoldNewEvents.Count
+            SmbRdmaEventCount = $FinalHoldNewSmbEvents.Count
+            DispositionedEventCount = $FinalHoldDispositionedKeys.Count
             ClusterEventEvidence = $FinalHoldClusterEventPath
             SmbRdmaEventEvidence = $FinalHoldSmbEventPath
         } | ConvertTo-Json -Depth 8
@@ -4694,7 +4835,213 @@ Set-ChangePhase -Phase ActiveValidationPassed
 If an active-validation terminal failure artifact exists, copy it into the support evidence set,
 record the explicit disposition, and rename the original with a
 `-dispositioned-<UTC timestamp>` suffix before a new attempt. Never delete or
-overwrite the original failure evidence.
+overwrite the original failure evidence. The recording block below does the rename.
+
+First list the events for review. This block is read-only. It re-runs the event queries from the original validation start, shows every event that the check returns now, and prints an `EventSetSha256` value that identifies exactly that set. It also defines the helper functions that the recording block uses.
+
+**Paste or run the whole block at once, not line by line.** It runs as one unit so that a failed check stops everything after it. It starts with `. {` so that the functions it defines remain in the session for the recording block.
+
+```powershell
+. {
+function Get-ActiveEventKey {
+    param($EventRecord)
+    $Created = ([datetime]$EventRecord.TimeCreated).ToUniversalTime()
+    (
+        "$("$($EventRecord.MachineName)".ToUpperInvariant())|" +
+        "$($EventRecord.LogName)|$($EventRecord.RecordId)|" +
+        "$($EventRecord.ProviderName)|$($EventRecord.Id)|" +
+        "$($Created.ToString('o'))"
+    )
+}
+
+function Get-ActiveValidationWindowStart {
+    $State = Get-Content -LiteralPath (
+        Join-Path $EvidenceRoot 'phase-state.json'
+    ) -Raw -ErrorAction Stop | ConvertFrom-Json
+    if (
+        "$($State.Operation)" -ne $Operation -or
+        "$($State.Phase)" -ne 'ActiveAssertionsPassed' -or
+        [string]::IsNullOrWhiteSpace("$($State.ActiveValidationStartUtc)")
+    ) {
+        throw "Event dispositions apply only at the ActiveAssertionsPassed checkpoint of the current operation."
+    }
+    # PowerShell 7 parses ISO dates in JSON; Windows PowerShell 5.1 does not.
+    if ($State.ActiveValidationStartUtc -is [datetime]) {
+        $State.ActiveValidationStartUtc.ToUniversalTime()
+    } else {
+        [datetime]::Parse(
+            "$($State.ActiveValidationStartUtc)",
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::RoundtripKind
+        ).ToUniversalTime()
+    }
+}
+
+function Get-ActiveValidationEventSet {
+    param([datetime]$WindowStartUtc)
+    $Events = @(Invoke-Command -ComputerName $Nodes.Name `
+        -ArgumentList $WindowStartUtc -ScriptBlock {
+            param($StartTime)
+            try {
+                Get-WinEvent -FilterHashtable @{
+                    LogName = 'System'
+                    ProviderName = 'Microsoft-Windows-FailoverClustering'
+                    Id = 1069, 1135, 1177, 5120, 5142
+                    StartTime = $StartTime
+                } -ErrorAction Stop |
+                    Select-Object MachineName, LogName, RecordId,
+                        ProviderName, Id, TimeCreated, Message
+            } catch {
+                if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') {
+                    throw
+                }
+            }
+            foreach ($Log in @(Get-WinEvent -ListLog '*SMB*' `
+                -ErrorAction Stop | Where-Object IsEnabled)) {
+                try {
+                    Get-WinEvent -FilterHashtable @{
+                        LogName = $Log.LogName
+                        StartTime = $StartTime
+                    } -ErrorAction Stop |
+                        Where-Object {
+                            $_.Level -le 3 -and $_.Message -match 'RDMA'
+                        } |
+                        Select-Object MachineName, LogName, RecordId,
+                            ProviderName, Id, TimeCreated, Message
+                } catch {
+                    if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') {
+                        throw
+                    }
+                }
+            }
+        } -ErrorAction Stop)
+    $Keys = @($Events | ForEach-Object { Get-ActiveEventKey -EventRecord $_ } |
+        Sort-Object -Unique)
+    $Sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $SetHash = [System.BitConverter]::ToString(
+            $Sha.ComputeHash(
+                [System.Text.Encoding]::UTF8.GetBytes($Keys -join "`n")
+            )
+        ).Replace('-', '')
+    } finally {
+        $Sha.Dispose()
+    }
+    [pscustomobject]@{
+        Events = $Events
+        Keys = $Keys
+        EventSetSha256 = $SetHash
+    }
+}
+
+$ReviewSet = Get-ActiveValidationEventSet `
+    -WindowStartUtc (Get-ActiveValidationWindowStart)
+$ReviewSet.Events |
+    Format-Table MachineName, LogName, RecordId, ProviderName, Id, TimeCreated -AutoSize
+"Events to review: $($ReviewSet.Keys.Count)"
+"EventSetSha256: $($ReviewSet.EventSetSha256)"
+}
+```
+
+**Stop here and confirm.** The change approver, with Microsoft Support when the failure needs it, reviews the failure artifact and every event that the listing block showed, and decides whether each event is explained and safe to accept. Done looks like: every listed event is accepted, and the following recording block prints `EVENT_DISPOSITION_RECORDED`. If any event is not accepted, do not record a disposition; follow the rollback decision instead.
+
+The recording block takes the `EventSetSha256` value that the approver reviewed. It re-runs the same queries and refuses if the current event set is different, for example because a new event arrived after the review; run the listing block again and get a new review. It then saves each event's node, log name, record ID, provider, event ID, and time in `active-validation-<Operation>-event-disposition.json`, bound to the change ID, operation, `ActiveAssertionsPassed` checkpoint, validation start, reviewed event-set hash, and failure-artifact hash, with a SHA-256 hash file next to it. A retry keeps the original validation start and excludes only events whose exact identity is in that record. Any new or different event still fails. The retry refuses a record that was edited, belongs to another operation or checkpoint, or lists an event that the check no longer returns. A later disposition supersedes the earlier record, which is renamed, not deleted.
+
+**Paste or run the whole block at once, not line by line.** It runs as one unit so that a failed check stops everything after it.
+
+```powershell
+& {
+# The EventSetSha256 value printed by the listing block and reviewed by the approver.
+$ConfirmedEventSetSha256 = '<EventSetSha256 from the listing block>'
+# The name of the person who dispositioned the failure.
+$DispositionedBy = '<reviewer name>'
+# Where the disposition is recorded, for example a change-record or support-case reference.
+$DispositionReference = '<disposition reference>'
+
+if (-not (Get-Command -Name Get-ActiveValidationEventSet -ErrorAction SilentlyContinue)) {
+    throw "Run the listing block first in this session."
+}
+if (
+    [string]::IsNullOrWhiteSpace($DispositionedBy) -or
+    $DispositionedBy -match '[<>]' -or
+    [string]::IsNullOrWhiteSpace($DispositionReference) -or
+    $DispositionReference -match '[<>]' -or
+    $ConfirmedEventSetSha256 -notmatch '^[0-9A-Fa-f]{64}$'
+) {
+    throw "Record the reviewed EventSetSha256, who dispositioned the failure, and where the disposition is recorded."
+}
+$FailurePath = Join-Path $EvidenceRoot `
+    "active-validation-$Operation-terminal-failure.json"
+if (-not (Test-Path -LiteralPath $FailurePath)) {
+    throw "No undispositioned active-validation failure artifact exists."
+}
+$FailureHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $FailurePath `
+    -ErrorAction Stop).Hash
+$WindowStartUtc = Get-ActiveValidationWindowStart
+$CurrentSet = Get-ActiveValidationEventSet -WindowStartUtc $WindowStartUtc
+if ($CurrentSet.EventSetSha256 -ne $ConfirmedEventSetSha256.ToUpperInvariant()) {
+    throw (
+        "The current event set does not match the reviewed set. Run the " +
+        "listing block again and get a new review."
+    )
+}
+
+$Stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
+$RecordPath = Join-Path $EvidenceRoot `
+    "active-validation-$Operation-event-disposition.json"
+$DispositionedFailureName = (
+    "active-validation-$Operation-terminal-failure-dispositioned-$Stamp.json"
+)
+$SupersededNames = @(
+    "active-validation-$Operation-event-disposition-superseded-$Stamp.json",
+    "active-validation-$Operation-event-disposition-superseded-$Stamp.json.sha256"
+)
+if (@(@($DispositionedFailureName) + $SupersededNames | Where-Object {
+    Test-Path -LiteralPath (Join-Path $EvidenceRoot $_)
+}).Count -gt 0) {
+    throw "A disposition file with this timestamp already exists. Wait one second and run the block again."
+}
+if (Test-Path -LiteralPath $RecordPath) {
+    Rename-Item -LiteralPath $RecordPath -NewName $SupersededNames[0] `
+        -ErrorAction Stop
+}
+if (Test-Path -LiteralPath "$RecordPath.sha256") {
+    Rename-Item -LiteralPath "$RecordPath.sha256" -NewName $SupersededNames[1] `
+        -ErrorAction Stop
+}
+
+[pscustomobject]@{
+    ChangeId = $ChangeId
+    Operation = $Operation
+    Phase = 'ActiveAssertionsPassed'
+    ActiveValidationStartUtc = $WindowStartUtc.ToString('o')
+    EventSetSha256 = $CurrentSet.EventSetSha256
+    FailureArtifactSha256 = $FailureHash
+    DispositionedBy = $DispositionedBy
+    DispositionReference = $DispositionReference
+    DispositionedUtc = (Get-Date).ToUniversalTime().ToString('o')
+    Events = @($CurrentSet.Events | ForEach-Object {
+        [pscustomobject]@{
+            Key = Get-ActiveEventKey -EventRecord $_
+            MachineName = "$($_.MachineName)"
+            LogName = "$($_.LogName)"
+            RecordId = "$($_.RecordId)"
+            ProviderName = "$($_.ProviderName)"
+            Id = [int]$_.Id
+            TimeCreatedUtc = ([datetime]$_.TimeCreated).ToUniversalTime().ToString('o')
+        }
+    })
+} | ConvertTo-Json -Depth 4 |
+    Set-Content -LiteralPath $RecordPath -ErrorAction Stop
+(Get-FileHash -Algorithm SHA256 -LiteralPath $RecordPath -ErrorAction Stop).Hash |
+    Set-Content -LiteralPath "$RecordPath.sha256" -ErrorAction Stop
+
+Rename-Item -LiteralPath $FailurePath -NewName $DispositionedFailureName `
+    -ErrorAction Stop
+"Dispositioned $($CurrentSet.Keys.Count) event(s)."
+'EVENT_DISPOSITION_RECORDED'
+}
+```
 
 Success requires:
 
@@ -4748,11 +5095,11 @@ if (Test-Path -LiteralPath $ActivePointer) {
 
 **Action type:** State-changing (evidence state only)
 
-Use this section only when the change is abandoned while the durable phase is still `Initialized`, `BaselineSealed`, or `WorkloadsOff`. In those phases the appliance VM, MOC, CSVs, storage pool, and Network ATC intent have not been changed. From `PlatformOff` onward, do not use this section: continue the forward change or use [Rollback](#rollback).
+Use this section only when the change is abandoned while the durable phase is still `Initialized`, `BaselineSealed`, or `WorkloadsOff`. In those phases the appliance VM, MOC, CSVs, storage pool, and Network ATC intent have not been changed. From `PlatformOff` onward, do not use this section. [Rollback](#rollback) starts only from `TargetReadbackVerified` or a later phase, so between `PlatformOff` and `TargetReadbackVerified` continue the forward change. If the forward change cannot continue in that window, stop and contact Microsoft Support; do not improvise a restore.
 
 **Stop here and confirm.** The change approver named in the change record decides to abandon the change. Done looks like: the decision is recorded in the change record, and the following block prints `CHANGE_ABANDONED`.
 
-**Operator action.** If the phase is `WorkloadsOff`, the workload owner starts the customer VMs that were `Running` when the baseline was sealed, through the normal startup process, and leaves VMs that were `Off` at the baseline off. Done looks like: the following block prints `CHANGE_ABANDONED`.
+**Operator action.** If the phase is `WorkloadsOff`, the workload owner starts the customer VMs that were `Running` when the baseline was sealed, from their own management machine through their normal startup process, not from this session on the cluster node, and leaves VMs that were `Off` at the baseline off. Done looks like: the following block prints `CHANGE_ABANDONED`.
 
 The block refuses any other phase. For `BaselineSealed` and `WorkloadsOff`, it first proves that every storage adapter still has the sealed source transport, that the sealed pool, MOC, every sealed CSV, and the appliance group are online, and that every customer VM is back in its sealed baseline state. It then persists `Abandoned`, stops the transcript, and removes only this operation's active pointer. It keeps the evidence directory.
 
@@ -4773,8 +5120,8 @@ if (
     throw (
         "Abandon is allowed only from Forward/Initialized, BaselineSealed, " +
         "or WorkloadsOff. Current state is " +
-        "'$($AbandonState.Operation)/$AbandonPhase'. Continue the change or " +
-        "use Rollback."
+        "'$($AbandonState.Operation)/$AbandonPhase'. Continue the change, use " +
+        "Rollback from TargetReadbackVerified or later, or contact Microsoft Support."
     )
 }
 
