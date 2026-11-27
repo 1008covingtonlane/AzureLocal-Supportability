@@ -509,7 +509,12 @@ This step changes nothing. A restart is needed only in the rare case where Step 
 | `RESTART_REQUIRED` | The external copy is still listed, and only a restart releases the files that hold it. Until the restart, Step 7 deletes nothing and the retry script retries nothing. | Restart the machine as the script prints. |
 | `CLUSTER_STATE_UNKNOWN` | Printed after `RESTART_REQUIRED`. `Get-ClusterNode` failed or returned no machines, and the script could not confirm that the Cluster service is not installed or that the machine has no cluster database, so it could not tell how to restart it safely. The line after it shows the reason. | Do not restart yet. Check in the Azure portal or in Failover Cluster Manager on another machine whether this machine is in a cluster. If it is one of several machines, [pause and drain it](https://learn.microsoft.com/azure/azure-local/manage/suspend-resume-cluster-maintenance) before the restart. If it is the only machine, plan a maintenance window and shut down or save its VMs first. After the restart, run Steps 5, 6, and 7 again. |
 
-If you restart the machine: **Changes:** restarts this machine and ends every program on it. In a cluster, pausing and draining the machine first moves its VMs to the other machines. **[HIGH RISK]** On a single-machine instance, the restart stops all running VMs until the machine is back.
+If you restart the machine: **Changes:** restarts this machine and ends every program on it. In a cluster, pausing and draining the machine first moves its VMs to the other machines.
+
+**Plan for:** on a single-machine instance, a maintenance window, because there is no other machine to drain to.
+
+> [!WARNING]
+> On a single-machine instance, this restart stops all running VMs.
 
 ### Step 7: Delete leftover folders
 
@@ -618,7 +623,7 @@ Do not use the system health check to confirm this fix. It can keep showing a pr
 
 ## Retry the failed operation
 
-Run this script on one machine, after [Verify the fix](#verify-the-fix) printed `ALL_MACHINES_CLEAN`, or printed `THIS_MACHINE_CLEAN` on every machine. It first checks this machine and every other machine that it can reach, the same way as Verify the fix, and it retries nothing if one of them is not clean. A machine that it cannot reach does not stop the retry, so run Verify the fix on each such machine first. It then resumes a solution update whose installation failed with the error in this article. For any other operation, it prints how to retry it. Paste or run the whole block at once.
+Run this script on one machine, after [Verify the fix](#verify-the-fix) printed `ALL_MACHINES_CLEAN`, or printed `THIS_MACHINE_CLEAN` on every machine. It first checks this machine and every other machine that it can reach, the same way as Verify the fix, and it retries nothing if one of them is not clean. A machine that it cannot reach does not stop the retry, so run Verify the fix on each such machine first. It then resumes a solution update whose installation failed with the error in this article. For any other operation, it prints how to retry it. Paste or run the whole block at once. To retry a solution update by hand instead, select **Try again** on the failed update in the Azure portal, or run `Get-SolutionUpdate | Where-Object Version -eq "<version>" | Start-SolutionUpdate`, replacing `<version>` with the version of the update that failed. This works whether the update failed in the readiness check (`HealthCheckFailed`) or during installation. If you ran the readiness check with `Start-SolutionUpdate -PrepareOnly`, retry in PowerShell, not in the Azure portal.
 
 **Changes:** resumes the update only when this machine and every machine that the script can reach are clean, no update is downloading, preparing, installing, or running health checks, and exactly one update is in the `InstallationFailed` state with the error from [Symptoms](#symptoms) in a failed step of its last run. The update continues from the step that failed. In every other case the script changes nothing.
 
@@ -754,7 +759,11 @@ Run this script on one machine, after [Verify the fix](#verify-the-fix) printed 
                 Write-Output "More than one update is in the InstallationFailed state, so none was resumed."
             } else {
                 Write-Output "NO_UPDATE_TO_RESUME"
-                Write-Output "No solution update failed during installation. Retry the operation that failed the same way you started it. An update that shows HealthCheckFailed failed in its readiness check: select Try again on it, or run the same Start-SolutionUpdate command again."
+                Write-Output "No solution update failed during installation. Retry the operation that failed the same way you started it."
+                foreach ($other in @($updates | Where-Object { "$($_.State)" -like '*Failed' })) {
+                    "$($other.DisplayName) is $($other.State). To retry it, run: Get-SolutionUpdate | Where-Object Version -eq `"$($other.Version)`" | Start-SolutionUpdate"
+                    "  Add -PrepareOnly if you ran only its readiness check with -PrepareOnly. If you started it in the Azure portal, you can instead select Try again on it there."
+                }
             }
             $notCheckedLines
             try { Get-SolutionUpdate -ErrorAction Stop 4>$null | Format-Table DisplayName, Version, State -AutoSize } catch { }
@@ -770,7 +779,7 @@ Run this script on one machine, after [Verify the fix](#verify-the-fix) printed 
 | `HEALTH_CHECK_STATE_UNKNOWN` | The failed update shows the error from [Symptoms](#symptoms), but the script could not read whether the system health check is running, so it resumed nothing. The line after it shows the reason. | Run this script again in a few minutes. If it keeps printing this, open **Updates** for your Azure Local instance, and when no health check is running and the failed update shows the error from [Symptoms](#symptoms), select **Try again**. |
 | `UPDATE_FAILED_FOR_OTHER_REASON` | No failed step in the failed update's last run shows the error from [Symptoms](#symptoms), or its error could not be read, so the script did not resume it. | Check the error under **Updates**. If it is the error from [Symptoms](#symptoms), select **Try again**. Otherwise, see [Troubleshoot solution updates for Azure Local](https://learn.microsoft.com/azure/azure-local/update/update-troubleshooting-23h2). |
 | `WINDOWS_POWERSHELL_REQUIRED` | The script ran in PowerShell 7 and did nothing. | Run it in Windows PowerShell 5.1. |
-| `NO_UPDATE_TO_RESUME` | No solution update failed during installation, so nothing was resumed. The script prints how to retry other operations, including an update that failed in its readiness check (`HealthCheckFailed`). | Retry the operation that failed the same way you started it. If you started a readiness check with `Start-SolutionUpdate -PrepareOnly`, use the same command again. |
+| `NO_UPDATE_TO_RESUME` | No solution update failed during installation, so nothing was resumed. For each update in another failed state, for example `HealthCheckFailed` after its readiness check failed, the script prints the command that retries it. | Retry the operation that failed the same way you started it. For a solution update, run the command the script printed: `Get-SolutionUpdate \| Where-Object Version -eq "<version>" \| Start-SolutionUpdate`. This works whether the update failed in the readiness check or during installation. If you ran only its readiness check with `Start-SolutionUpdate -PrepareOnly`, add `-PrepareOnly` to run only the check again, and do not continue in the Azure portal. If you started the update in the Azure portal, you can instead select **Try again** there. |
 | `CLUSTER_NOT_DEPLOYED` | The cluster does not exist yet, so the failed operation is a deployment. Only this machine was checked. | Confirm with [Verify the fix](#verify-the-fix) that every machine prints `THIS_MACHINE_CLEAN`, then resume the deployment as described in [Resume deployment](https://learn.microsoft.com/azure/azure-local/deploy/deploy-via-portal#resume-deployment). |
 | `UPDATE_SERVICE_NOT_AVAILABLE` | The cluster exists, but the solution update service did not answer. This can happen when a deployment failed after the cluster was created. | For a deployment, see [Resume deployment](https://learn.microsoft.com/azure/azure-local/deploy/deploy-via-portal#resume-deployment). On a deployed system, see [Troubleshoot solution updates for Azure Local](https://learn.microsoft.com/azure/azure-local/update/update-troubleshooting-23h2). |
 | `UPDATE_CHECK_BUSY` | Another machine was reading or starting the update at the same moment, for example because this script runs on several machines at once, and the update service was still busy after three tries within about a minute. Nothing was retried on this machine. | Run this script again in a minute. |
