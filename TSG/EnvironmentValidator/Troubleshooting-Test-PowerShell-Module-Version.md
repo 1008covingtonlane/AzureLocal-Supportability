@@ -306,9 +306,7 @@ recipe. It removes those versions without checking whether other installed
 modules need them, so a module that needs one of them can fail to import afterward.
 It uninstalls before it reinstalls and has no rollback, so if the recipe version
 cannot be downloaded, a module whose only installed version was newer than the recipe
-can be left not installed at all. For example, repairing a missing `ArcHci` also
-reinstalls its dependency modules and removes an older side-by-side `Az.Accounts`
-version that is not in the recipe.
+can be left not installed at all.
 
 > [!WARNING]
 > There is no automatic rollback for this helper. Replacing a module that a
