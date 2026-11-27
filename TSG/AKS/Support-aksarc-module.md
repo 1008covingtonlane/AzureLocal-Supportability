@@ -146,22 +146,39 @@ else { 'NO-VM-REMOVAL' }
 - `VM-REMOVAL-PENDING`: the command below would stop and remove the VMs that the message lists, and any other VM whose name contains one of those names. Run the next check to see every VM it would remove.
 - `TEST-DID-NOT-RUN`: the test ran no checks. Use the results table above to find out why.
 
-If the check printed `VM-REMOVAL-PENDING`, run this in the same PowerShell window. It lists every cluster role and Hyper-V VM that the fix would stop and remove, matched the same way the fix matches them, and changes nothing:
+If the check printed `VM-REMOVAL-PENDING`, run this in the same PowerShell window. It lists every cluster role and Hyper-V VM that the fix would stop and remove, matched the same way the fix matches them, and changes nothing. Its last line is `VM-LIST-COMPLETE` only if it checked every machine that is `Up`.
+
+**Stop here and confirm.** Before anyone runs the command below, the owner of the VMs reviews the list this check prints and decides whether every VM on it can be removed. Done looks like: the last line is `VM-LIST-COMPLETE`, and the owner has confirmed each listed VM by name.
 
 ```powershell
-foreach ($name in @($vmTest | ForEach-Object { $_.AffectedVMs } | ForEach-Object { $_.VMName })) {
-    $groups = @(Get-ClusterGroup | Where-Object { $_.Name.Contains($name) })
-    if ($groups.Count -gt 0) { $groups | ForEach-Object { "MOC VM $name -> cluster role $($_.Name) on $($_.OwnerNode.Name)" } }
-    else {
-        $vms = @(foreach ($node in @(Get-ClusterNode | Where-Object { $_.State -eq 'Up' } | ForEach-Object { $_.Name })) {
-            Get-VM -ComputerName $node -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*$name*" } | ForEach-Object { "MOC VM $name -> Hyper-V VM $($_.Name) on $node" }
-        })
-        if ($vms.Count -gt 0) { $vms } else { "MOC VM $name -> no matching cluster role or Hyper-V VM found" }
+$listComplete = $true
+try {
+    $pending = @($vmTest | Where-Object { $_.Status -in 'Failed', 'Error' })
+    $names = @($pending | ForEach-Object { $_.AffectedVMs } | ForEach-Object { $_.VMName })
+    if ($vmTest.Count -eq 0) { $listComplete = $false; 'VM-LIST-ERROR: run the check above first, in this window.' }
+    elseif ($pending.Count -eq 0) { 'NO-VM-REMOVAL-PENDING' }
+    elseif ($names.Count -eq 0) { $listComplete = $false; 'VM-LIST-ERROR: the test result lists no VM names. Run the check above again in this window.' }
+    foreach ($name in $names) {
+        $groups = @(Get-ClusterGroup -ErrorAction Stop | Where-Object { $_.Name.Contains($name) })
+        if ($groups.Count -gt 0) { $groups | ForEach-Object { "MOC VM $name -> cluster role $($_.Name) on $($_.OwnerNode.Name)" } }
+        else {
+            $vms = @(); $notChecked = @()
+            foreach ($node in @(Get-ClusterNode -ErrorAction Stop | Where-Object { $_.State -eq 'Up' } | ForEach-Object { $_.Name })) {
+                try { $vms += @(Get-VM -ComputerName $node -ErrorAction Stop | Where-Object { $_.Name -like "*$name*" } | ForEach-Object { "MOC VM $name -> Hyper-V VM $($_.Name) on $node" }) }
+                catch { $notChecked += "MOC VM $name -> NOT CHECKED on ${node}: $($_.Exception.Message)" }
+            }
+            $vms; $notChecked
+            if ($notChecked.Count -gt 0) { $listComplete = $false }
+            elseif ($vms.Count -eq 0) { "MOC VM $name -> no matching cluster role or Hyper-V VM found" }
+        }
     }
-}
+} catch { $listComplete = $false; "VM-LIST-ERROR: $($_.Exception.Message)" }
+if ($listComplete) { 'VM-LIST-COMPLETE' } else { 'VM-LIST-INCOMPLETE' }
 ```
 
-- If every VM it lists is one you intend to remove, you can run the command below.
+- If it prints `NO-VM-REMOVAL-PENDING` and then `VM-LIST-COMPLETE`, the fix would remove no VMs, and there is nothing for the owner to confirm.
+- If the last line is `VM-LIST-COMPLETE` and the owner confirmed that every VM it lists can be removed, you can run the command below.
+- If the last line is `VM-LIST-INCOMPLETE`, the list is missing at least one machine: a `NOT CHECKED` line names the machine it couldn't query, or a `VM-LIST-ERROR` line shows why the check stopped. Don't run the command below, and don't approve removing any VM, until every machine is checked. Fix the reason shown, for example Hyper-V access to that machine, and run this check again.
 - If any VM it lists isn't one you intend to remove, or you aren't sure, stop. Don't run the command below. Contact Microsoft Support before you remove any VM. You can still run the block that skips that test, after the command below, to fix the other failed tests.
 
 ```powershell
@@ -221,11 +238,15 @@ else { 'NO-MANUAL-RESTART' }
 
 - `NO-MANUAL-RESTART`: continue with [Verify the fix](#verify-the-fix).
 - `MANUAL-RESTART-NEEDED`: the message names the machine. Run `Get-ClusterNode` to see its state:
-  - If the machine is `Up` or `Paused`, restart it as described in [Suspend and resume Azure Local machines for maintenance](https://learn.microsoft.com/azure/azure-local/manage/suspend-resume-cluster-maintenance).
+  - If the machine is `Up` or `Paused`, follow [If the machine is Up or Paused](#if-the-machine-is-up-or-paused).
   - If the machine is `Down`, follow [If the machine is Down](#if-the-machine-is-down).
 
   Then run this check again. If it still prints `MANUAL-RESTART-NEEDED`, contact Microsoft Support.
 - `TEST-DID-NOT-RUN`: at least one of the two tests ran no checks, so the check can't say that no restart is needed. Use the results table above to find out why, and then run this check again.
+
+#### If the machine is Up or Paused
+
+**Operator action.** An administrator restarts the machine as described in [Suspend and resume Azure Local machines for maintenance](https://learn.microsoft.com/azure/azure-local/manage/suspend-resume-cluster-maintenance): suspend and drain it, restart it, and resume it. Done looks like: `Get-ClusterNode` shows the machine `Up`, and the check above prints `NO-MANUAL-RESTART`.
 
 **Changes:** the restart moves the machine's workloads to other machines, restarts it, and returns it to the instance. On a single-machine instance there is no other machine, so its VMs stop until the restart finishes.
 
@@ -233,19 +254,65 @@ else { 'NO-MANUAL-RESTART' }
 
 #### If the machine is Down
 
-A machine that is `Down` isn't running any workloads, so you don't need to drain or suspend it first.
+`Down` means the instance can't reach the machine's Cluster service. The machine can still be powered on and running VMs, for example when only its Cluster service stopped or it lost network communication with the other machines. Find out which before you restart anything.
 
-1. Turn on or restart the machine, from its baseboard management controller (BMC) or at the machine.
-2. After it starts, run this on any machine that is `Up` (on a single-machine instance, on that machine), until the machine shows `Up`:
+1. Check whether the machine is reachable and what runs on it. Replace `MACHINE-NAME` with the machine's name, and run this on any machine that is `Up` (on a single-machine instance, on that machine). It changes nothing:
+
+   ```powershell
+   $machine = 'MACHINE-NAME'
+   try {
+       if ($machine -ne $env:COMPUTERNAME) { $null = Get-ClusterNode -Name $machine -ErrorAction Stop }
+       $state = $null
+       try {
+           $state = Invoke-Command -ComputerName $machine -ErrorAction Stop -ScriptBlock {
+               $svc = $null; $svcError = $null; $vms = $null; $vmError = $null
+               try { $svc = [string](Get-Service -Name ClusSvc -ErrorAction Stop).Status } catch { $svcError = $_.Exception.Message }
+               try { $vms = @(Get-VM -ErrorAction Stop | Where-Object { $_.State -ne 'Off' } | ForEach-Object { "$($_.Name) ($($_.State))" }) } catch { $vmError = $_.Exception.Message }
+               [pscustomobject]@{ ClusSvc = $svc; ClusSvcError = $svcError; VMs = $vms; VMError = $vmError }
+           }
+       } catch { "MACHINE-NOT-REACHABLE: $($_.Exception.Message)" }
+       if ($state -and ($state.ClusSvcError -or $state.VMError)) {
+           "MACHINE-CHECK-INCOMPLETE ClusSvc=$($state.ClusSvc) $($state.ClusSvcError) $($state.VMError)"
+       }
+       elseif ($state) {
+           "MACHINE-REACHABLE ClusSvc=$($state.ClusSvc) VMsNotOff=$(@($state.VMs).Count)"
+           @($state.VMs) | ForEach-Object { "  VM: $_" }
+       }
+   } catch { "CHECK-ERROR: $($_.Exception.Message)" }
+   ```
+
+   - `MACHINE-REACHABLE` with `ClusSvc` other than `Running`: the machine is on, and only its Cluster service stopped. Don't restart the machine. Start the service instead, which doesn't stop its VMs: `Invoke-Command -ComputerName $machine -ScriptBlock { Start-Service -Name ClusSvc }`. Then go to step 4.
+   - `MACHINE-REACHABLE` with `ClusSvc=Running`: the machine is on, but the instance can't communicate with it. Don't restart it; a restart would stop the VMs it lists. Contact Microsoft Support.
+   - `MACHINE-CHECK-INCOMPLETE`: the machine is on, but its Cluster service state or its VMs couldn't be read. Don't restart it. Contact Microsoft Support.
+   - `MACHINE-NOT-REACHABLE`: go to step 2.
+   - `CHECK-ERROR`: the machine name isn't a machine in this instance, or the instance couldn't be queried. Fix the name and run the check again.
+
+2. Check the machine from its baseboard management controller (BMC) or at the machine. Restart it only if it's powered off or doesn't respond at all, from its console or on the network. If it's powered on and responds, don't restart it; contact Microsoft Support.
+
+   On an instance with more than one machine, run this in the same PowerShell window as step 1, on a machine that is `Up`, to confirm that its clustered VMs moved to other machines. It changes nothing:
+
+   ```powershell
+   try {
+       $left = $null
+       $left = @(Get-ClusterGroup -ErrorAction Stop | Where-Object { $_.OwnerNode.Name -eq $machine })
+       if ($left.Count -eq 0) { 'ROLES-MOVED' } else { 'ROLES-NOT-MOVED'; $left | Format-Table Name, State }
+   } catch { "FAILOVER-CHECK-ERROR: $($_.Exception.Message)" }
+   ```
+
+   Restart the machine only if this prints `ROLES-MOVED`. `ROLES-NOT-MOVED` lists the roles that didn't move, and `FAILOVER-CHECK-ERROR` means the instance couldn't be queried, so the check couldn't confirm that the VMs moved. In both cases, don't restart the machine. Contact Microsoft Support.
+
+3. **Operator action.** An administrator turns on or restarts the machine from its BMC or at the machine, only after step 2 shows that it's off or unresponsive and, on an instance with more than one machine, that its VMs moved. Done looks like: step 4 shows the machine `Up` or `Paused`.
+
+4. Run this on any machine that is `Up` (on a single-machine instance, on that machine), until the machine shows `Up` or `Paused`:
 
    ```powershell
    Get-ClusterNode | Format-Table Name, State
    ```
 
-3. If the machine shows `Paused`, resume it with `Resume-ClusterNode -Name` followed by the machine name.
-4. Run the check above again.
+5. If the machine shows `Paused`, resume it with `Resume-ClusterNode -Name` followed by the machine name.
+6. Run the check in [If a test has no automatic fix](#if-a-test-has-no-automatic-fix) again.
 
-**Changes:** starts the machine and returns it to the instance. It doesn't move or stop any workload. On a single-machine instance, every VM already stopped when the machine went `Down`. Clustered VMs normally start again when the instance brings its roles back online; check that the VMs you need are running.
+**Changes:** starting the Cluster service returns the machine to the instance without stopping its VMs. Turning on or restarting the machine from its BMC stops anything still running on it, which is why you check first that it's off or unresponsive. On a single-machine instance, that restart stops every VM on the machine. Clustered VMs normally start again when the instance brings its roles back online; check that the VMs you need are running.
 
 ### Verify the fix
 
