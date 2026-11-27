@@ -177,7 +177,7 @@ How to read the result for each machine. The all-machines check prints the same 
 | Result | Meaning | Next step |
 | --- | --- | --- |
 | `EXTERNAL_COPY_FOUND` | An external copy is present. | Follow Steps 1 to 7 in [Mitigation Details](#mitigation-details). |
-| `LEFTOVER_FOLDER_ONLY` | A leftover folder from a partly removed copy. It no longer loads. | Go to [Step 7](#step-7-delete-leftover-folders). If it tells you to leave the folder until the next planned restart, no further action is needed now. |
+| `LEFTOVER_FOLDER_ONLY` | A leftover folder from a partly removed copy. It no longer loads. | Follow Steps 1 to 7 in [Mitigation Details](#mitigation-details). Steps 1 to 4 release the folder's files if a program still holds them, Step 5 has nothing to uninstall, and [Step 7](#step-7-delete-leftover-folders) deletes the folder. If Step 7 tells you to leave the folder until the next planned restart, no further action is needed now. |
 | `NOT_AFFECTED` | This machine is not affected. | None. |
 | `INBOX_MODULE_MISSING` | The inbox module is missing. | Stop and [contact Microsoft support](#when-to-contact-microsoft-support). Do not install a replacement. The cleanup scripts in Steps 5 and 7 remove nothing on a machine without the inbox module, and the retry script retries nothing. |
 | `Not checked from here` | All-machines check only: PowerShell remoting to that machine failed, so it was not checked. This does not mean that it is affected. `Note` shows the reason. | Run the single-machine check on that machine. |
