@@ -257,15 +257,20 @@ else { 'NO-MANUAL-RESTART' }
    ```powershell
    $machine = 'MACHINE-NAME'
    try {
-       $null = Get-ClusterNode -Name $machine -ErrorAction Stop
+       if ($machine -ne $env:COMPUTERNAME) { $null = Get-ClusterNode -Name $machine -ErrorAction Stop }
        $state = $null
        try {
            $state = Invoke-Command -ComputerName $machine -ErrorAction Stop -ScriptBlock {
-               $ErrorActionPreference = 'Stop'
-               [pscustomobject]@{ ClusSvc = [string](Get-Service -Name ClusSvc).Status; VMs = @(Get-VM | Where-Object { $_.State -ne 'Off' } | ForEach-Object { "$($_.Name) ($($_.State))" }) }
+               $svc = $null; $svcError = $null; $vms = $null; $vmError = $null
+               try { $svc = [string](Get-Service -Name ClusSvc -ErrorAction Stop).Status } catch { $svcError = $_.Exception.Message }
+               try { $vms = @(Get-VM -ErrorAction Stop | Where-Object { $_.State -ne 'Off' } | ForEach-Object { "$($_.Name) ($($_.State))" }) } catch { $vmError = $_.Exception.Message }
+               [pscustomobject]@{ ClusSvc = $svc; ClusSvcError = $svcError; VMs = $vms; VMError = $vmError }
            }
        } catch { "MACHINE-NOT-REACHABLE: $($_.Exception.Message)" }
-       if ($state) {
+       if ($state -and ($state.ClusSvcError -or $state.VMError)) {
+           "MACHINE-CHECK-INCOMPLETE ClusSvc=$($state.ClusSvc) $($state.ClusSvcError) $($state.VMError)"
+       }
+       elseif ($state) {
            "MACHINE-REACHABLE ClusSvc=$($state.ClusSvc) VMsNotOff=$(@($state.VMs).Count)"
            @($state.VMs) | ForEach-Object { "  VM: $_" }
        }
@@ -274,18 +279,23 @@ else { 'NO-MANUAL-RESTART' }
 
    - `MACHINE-REACHABLE` with `ClusSvc` other than `Running`: the machine is on, and only its Cluster service stopped. Don't restart the machine. Start the service instead, which doesn't stop its VMs: `Invoke-Command -ComputerName $machine -ScriptBlock { Start-Service -Name ClusSvc }`. Then go to step 4.
    - `MACHINE-REACHABLE` with `ClusSvc=Running`: the machine is on, but the instance can't communicate with it. Don't restart it; a restart would stop the VMs it lists. Contact Microsoft Support.
+   - `MACHINE-CHECK-INCOMPLETE`: the machine is on, but its Cluster service state or its VMs couldn't be read. Don't restart it. Contact Microsoft Support.
    - `MACHINE-NOT-REACHABLE`: go to step 2.
    - `CHECK-ERROR`: the machine name isn't a machine in this instance, or the instance couldn't be queried. Fix the name and run the check again.
 
 2. Check the machine from its baseboard management controller (BMC) or at the machine. Restart it only if it's powered off or doesn't respond at all, from its console or on the network. If it's powered on and responds, don't restart it; contact Microsoft Support.
 
-   On an instance with more than one machine, run this in the same PowerShell window as step 1, on a machine that is `Up`, to confirm that its clustered VMs moved to other machines. It should print nothing:
+   On an instance with more than one machine, run this in the same PowerShell window as step 1, on a machine that is `Up`, to confirm that its clustered VMs moved to other machines. It changes nothing:
 
    ```powershell
-   Get-ClusterGroup | Where-Object { $_.OwnerNode.Name -eq $machine } | Format-Table Name, State
+   try {
+       $left = $null
+       $left = @(Get-ClusterGroup -ErrorAction Stop | Where-Object { $_.OwnerNode.Name -eq $machine })
+       if ($left.Count -eq 0) { 'ROLES-MOVED' } else { 'ROLES-NOT-MOVED'; $left | Format-Table Name, State }
+   } catch { "FAILOVER-CHECK-ERROR: $($_.Exception.Message)" }
    ```
 
-   If it lists any VM role, that VM didn't move. Contact Microsoft Support before you restart the machine.
+   Restart the machine only if this prints `ROLES-MOVED`. `ROLES-NOT-MOVED` lists the roles that didn't move, and `FAILOVER-CHECK-ERROR` means the instance couldn't be queried, so the check couldn't confirm that the VMs moved. In both cases, don't restart the machine. Contact Microsoft Support.
 
 3. **Operator action.** An administrator turns on or restarts the machine from its BMC or at the machine, only after step 2 shows that it's off or unresponsive and, on an instance with more than one machine, that its VMs moved. Done looks like: step 4 shows the machine `Up` or `Paused`.
 
