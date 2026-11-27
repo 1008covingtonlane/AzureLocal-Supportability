@@ -321,12 +321,18 @@ else { 'NO-MANUAL-RESTART' }
 
 `Down` means the instance can't reach the machine's Cluster service. The machine can still be powered on and running VMs, for example when only its Cluster service stopped or it lost network communication with the other machines. Find out which before you restart anything.
 
-1. Check whether the machine is reachable and what runs on it. Replace `MACHINE-NAME` with the machine's name, and run this on any machine that is `Up` (on a single-machine instance, on that machine). It changes nothing:
+1. Check whether the machine is reachable and what runs on it. Run this on any machine that is `Up` (on a single-machine instance, on that machine). It finds the machine that is `Down` itself, and stops with `CHECK-ERROR` unless exactly one machine is `Down`. It changes nothing:
 
    ```powershell
-   $machine = 'MACHINE-NAME'
    try {
-       if ($machine -ne $env:COMPUTERNAME) { $null = Get-ClusterNode -Name $machine -ErrorAction Stop }
+       $machine = $null
+       try { $machine = @(Get-ClusterNode -ErrorAction Stop | Where-Object { [string]$_.State -eq 'Down' } | ForEach-Object { $_.Name }) }
+       catch {
+           if ([string](Get-Service -Name ClusSvc -ErrorAction Stop).Status -eq 'Running') { throw }
+           $machine = @($env:COMPUTERNAME)
+       }
+       if ($machine.Count -ne 1) { throw "expected exactly one machine that is Down, found $($machine.Count)." }
+       $machine = [string]$machine[0]
        $state = $null
        try {
            $state = Invoke-Command -ComputerName $machine -ErrorAction Stop -ScriptBlock {
@@ -335,12 +341,12 @@ else { 'NO-MANUAL-RESTART' }
                try { $vms = @(Get-VM -ErrorAction Stop | Where-Object { $_.State -ne 'Off' } | ForEach-Object { "$($_.Name) ($($_.State))" }) } catch { $vmError = $_.Exception.Message }
                [pscustomobject]@{ ClusSvc = $svc; ClusSvcError = $svcError; VMs = $vms; VMError = $vmError }
            }
-       } catch { "MACHINE-NOT-REACHABLE: $($_.Exception.Message)" }
+       } catch { "MACHINE-NOT-REACHABLE Machine=${machine}: $($_.Exception.Message)" }
        if ($state -and ($state.ClusSvcError -or $state.VMError)) {
-           "MACHINE-CHECK-INCOMPLETE ClusSvc=$($state.ClusSvc) $($state.ClusSvcError) $($state.VMError)"
+           "MACHINE-CHECK-INCOMPLETE Machine=$machine ClusSvc=$($state.ClusSvc) $($state.ClusSvcError) $($state.VMError)"
        }
        elseif ($state) {
-           "MACHINE-REACHABLE ClusSvc=$($state.ClusSvc) VMsNotOff=$(@($state.VMs).Count)"
+           "MACHINE-REACHABLE Machine=$machine ClusSvc=$($state.ClusSvc) VMsNotOff=$(@($state.VMs).Count)"
            @($state.VMs) | ForEach-Object { "  VM: $_" }
        }
    } catch { "CHECK-ERROR: $($_.Exception.Message)" }
@@ -350,40 +356,44 @@ else { 'NO-MANUAL-RESTART' }
    - `MACHINE-REACHABLE` with `ClusSvc=Running`: the machine is on, but the instance can't communicate with it. Don't restart it; a restart would stop the VMs it lists. Contact Microsoft Support.
    - `MACHINE-CHECK-INCOMPLETE`: the machine is on, but its Cluster service state or its VMs couldn't be read. Don't restart it. Contact Microsoft Support.
    - `MACHINE-NOT-REACHABLE`: go to step 2.
-   - `CHECK-ERROR`: the machine name isn't a machine in this instance, or the instance couldn't be queried. Fix the name and run the check again.
+   - `CHECK-ERROR`: the check didn't find exactly one machine that is `Down`, or the instance couldn't be queried. If no machine is `Down` now, run the check in [If a test has no automatic fix](#if-a-test-has-no-automatic-fix) again. If more than one machine is `Down`, don't restart any of them; contact Microsoft Support.
+
+   Each result names the machine it checked in `Machine=`. Keep this PowerShell window open: the command that starts the Cluster service uses that machine.
 
 2. Check the machine from its baseboard management controller (BMC) or at the machine. Restart it only if it's powered off or doesn't respond at all, from its console or on the network. If it's powered on and responds, don't restart it; contact Microsoft Support.
 
-   On an instance with more than one machine, run this in the same PowerShell window as step 1, on a machine that is `Up`, to confirm that its clustered VMs moved to other machines. It changes nothing:
+   On an instance with more than one machine, run this on a machine that is `Up` to confirm that the clustered VMs of the machine that is `Down` moved to other machines. It finds that machine the same way as step 1, and changes nothing:
 
    ```powershell
    try {
-       $left = $null
-       $left = @(Get-ClusterGroup -ErrorAction Stop | Where-Object { $_.OwnerNode.Name -eq $machine })
-       if ($left.Count -eq 0) { 'ROLES-MOVED' } else { 'ROLES-NOT-MOVED'; $left | Format-Table Name, State }
+       $down = @(Get-ClusterNode -ErrorAction Stop | Where-Object { [string]$_.State -eq 'Down' } | ForEach-Object { [string]$_.Name })
+       if ($down.Count -ne 1) { throw "expected exactly one machine that is Down, found $($down.Count)." }
+       $left = @(Get-ClusterGroup -ErrorAction Stop | Where-Object { $_.OwnerNode.Name -eq $down[0] })
+       if ($left.Count -eq 0) { "ROLES-MOVED Machine=$($down[0])" } else { "ROLES-NOT-MOVED Machine=$($down[0])"; $left | Format-Table Name, State }
    } catch { "FAILOVER-CHECK-ERROR: $($_.Exception.Message)" }
    ```
 
-   Restart the machine only if this prints `ROLES-MOVED`. `ROLES-NOT-MOVED` lists the roles that didn't move, and `FAILOVER-CHECK-ERROR` means the instance couldn't be queried, so the check couldn't confirm that the VMs moved. In both cases, don't restart the machine. Contact Microsoft Support.
+   Restart the machine only if this prints `ROLES-MOVED` for the machine that step 1 checked. `ROLES-NOT-MOVED` lists the roles that didn't move, and `FAILOVER-CHECK-ERROR` means the check didn't find exactly one machine that is `Down` or the instance couldn't be queried, so the check couldn't confirm that the VMs moved. In both cases, don't restart the machine. Contact Microsoft Support.
 
 3. **Operator action.** An administrator turns on or restarts the machine from its BMC or at the machine, only after step 2 shows that it's off or unresponsive and, on an instance with more than one machine, that its VMs moved. Done looks like: step 4 prints `MACHINE-UP-OR-PAUSED`.
 
-4. Replace `MACHINE-NAME` with the machine's name, and run this on any machine that is `Up` (on a single-machine instance, on that machine), until the machine shows `Up` or `Paused`. It changes nothing:
+4. Run this on any machine that is `Up` (on a single-machine instance, on that machine), until it prints `MACHINE-UP-OR-PAUSED`. Step 1 found exactly one machine that is `Down`, so when every machine is `Up` or `Paused`, that machine is back. It changes nothing:
 
    ```powershell
-   $machine = 'MACHINE-NAME'
    try {
-       if ($machine -eq 'MACHINE-NAME') { throw 'Replace MACHINE-NAME with the machine name.' }
-       $state = [string](Get-ClusterNode -Name $machine -ErrorAction Stop).State
-       if ($state -in 'Up', 'Paused') { "MACHINE-UP-OR-PAUSED State=$state" } else { "MACHINE-NOT-YET-UP State=$state" }
+       $nodes = @(Get-ClusterNode -ErrorAction Stop)
+       if ($nodes.Count -eq 0) { throw 'the instance returned no machines.' }
+       $notBack = @($nodes | Where-Object { [string]$_.State -notin 'Up', 'Paused' })
+       if ($notBack.Count -eq 0) { 'MACHINE-UP-OR-PAUSED'; $nodes | Where-Object { [string]$_.State -eq 'Paused' } | ForEach-Object { "Paused: $($_.Name)" } }
+       else { 'MACHINE-NOT-YET-UP'; $notBack | ForEach-Object { "$($_.State): $($_.Name)" } }
    } catch { "NODE-CHECK-ERROR: $($_.Exception.Message)" }
    ```
 
-   - `MACHINE-UP-OR-PAUSED`: the machine is back in the instance. Go to step 5.
-   - `MACHINE-NOT-YET-UP`: the machine isn't back yet. Wait a few minutes and run the check again. If it stays in this state, contact Microsoft Support.
-   - `NODE-CHECK-ERROR`: the machine name isn't a machine in this instance, or the instance couldn't be queried yet. Fix the name, or wait a few minutes, and run the check again.
+   - `MACHINE-UP-OR-PAUSED`: no machine is `Down`, so the machine is back in the instance. A `Paused:` line names each machine that is `Paused`. Go to step 5.
+   - `MACHINE-NOT-YET-UP`: the lines after it name each machine that isn't `Up` or `Paused` yet, with its state. Wait a few minutes and run the check again. If it stays in this state, contact Microsoft Support.
+   - `NODE-CHECK-ERROR`: the instance couldn't be queried yet, for example while the only machine of a single-machine instance starts. Wait a few minutes and run the check again.
 
-5. If the machine shows `Paused`, resume it with `Resume-ClusterNode -Name` followed by the machine name.
+5. If step 4 printed a `Paused:` line for the machine that step 1 checked, resume it with `Resume-ClusterNode -Name` followed by that machine's name.
 6. Run the check in [If a test has no automatic fix](#if-a-test-has-no-automatic-fix) again.
 
 **Changes:** starting the Cluster service returns the machine to the instance without stopping its VMs. Turning on or restarting the machine from its BMC stops anything still running on it, which is why you check first that it's off or unresponsive. On a single-machine instance, that restart stops every VM on the machine. Clustered VMs normally start again when the instance brings its roles back online; check that the VMs you need are running.
