@@ -153,8 +153,11 @@ If the check printed `VM-REMOVAL-PENDING`, run this in the same PowerShell windo
 ```powershell
 $listComplete = $true
 try {
-    $names = @($vmTest | ForEach-Object { $_.AffectedVMs } | ForEach-Object { $_.VMName })
-    if ($names.Count -eq 0) { $listComplete = $false; 'VM-LIST-ERROR: the test result lists no VM names. Run the check above again in this window.' }
+    $pending = @($vmTest | Where-Object { $_.Status -in 'Failed', 'Error' })
+    $names = @($pending | ForEach-Object { $_.AffectedVMs } | ForEach-Object { $_.VMName })
+    if ($vmTest.Count -eq 0) { $listComplete = $false; 'VM-LIST-ERROR: run the check above first, in this window.' }
+    elseif ($pending.Count -eq 0) { 'NO-VM-REMOVAL-PENDING' }
+    elseif ($names.Count -eq 0) { $listComplete = $false; 'VM-LIST-ERROR: the test result lists no VM names. Run the check above again in this window.' }
     foreach ($name in $names) {
         $groups = @(Get-ClusterGroup -ErrorAction Stop | Where-Object { $_.Name.Contains($name) })
         if ($groups.Count -gt 0) { $groups | ForEach-Object { "MOC VM $name -> cluster role $($_.Name) on $($_.OwnerNode.Name)" } }
@@ -173,6 +176,7 @@ try {
 if ($listComplete) { 'VM-LIST-COMPLETE' } else { 'VM-LIST-INCOMPLETE' }
 ```
 
+- If it prints `NO-VM-REMOVAL-PENDING` and then `VM-LIST-COMPLETE`, the fix would remove no VMs, and there is nothing for the owner to confirm.
 - If the last line is `VM-LIST-COMPLETE` and the owner confirmed that every VM it lists can be removed, you can run the command below.
 - If the last line is `VM-LIST-INCOMPLETE`, the list is missing at least one machine: a `NOT CHECKED` line names the machine it couldn't query, or a `VM-LIST-ERROR` line shows why the check stopped. Don't run the command below, and don't approve removing any VM, until every machine is checked. Fix the reason shown, for example Hyper-V access to that machine, and run this check again.
 - If any VM it lists isn't one you intend to remove, or you aren't sure, stop. Don't run the command below. Contact Microsoft Support before you remove any VM. You can still run the block that skips that test, after the command below, to fix the other failed tests.
