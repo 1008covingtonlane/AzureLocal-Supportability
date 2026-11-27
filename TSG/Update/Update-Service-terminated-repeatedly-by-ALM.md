@@ -24,13 +24,15 @@ Name                                         OwnerNode State
 Azure Stack HCI Update Service Cluster Group v-Host1   Online
 ```
 
-Run the following commands to find events indicating that the update service was terminated due to exceeding the memory limit:
+The service that enforces the update service memory limit writes these events. Before the 2701 release it is the Agent Lifecycle Agent (ALM), and its events use the provider name `AzureStack Agent Lifecycle Agent`. From the 2701 release, the Resource Governor Agent (`AzureStack Resource Governor Agent`) replaces ALM's watchdog, and its events use the provider name `ResourceGovernorAgent`. Both write to the Application log.
+
+Run the following commands to find events indicating that the update service was terminated due to exceeding the memory limit. The command checks both provider names, so it works on every release:
 
 ```powershell
-Get-WinEvent -LogName Application | where ProviderName -eq "AzureStack Agent Lifecycle Agent" | where Message -match "Azure Stack HCI Update Service: Memory Error Limit Reached"
+Get-WinEvent -LogName Application | where { $_.ProviderName -in @("AzureStack Agent Lifecycle Agent", "ResourceGovernorAgent") } | where Message -match "Azure Stack HCI Update Service: Memory Error Limit Reached"
 ```
 
-Sample output. Note the `TimeCreated` value to determine that these are recent, relevant events. If the event times are not recent they are likely not relevant:
+Sample output from a release before 2701 (from 2701, `ProviderName` is `ResourceGovernorAgent`). Note the `TimeCreated` value to determine that these are recent, relevant events. If the event times are not recent they are likely not relevant:
 ```
    ProviderName: AzureStack Agent Lifecycle Agent
 
@@ -137,8 +139,10 @@ If the problem is still occurring, the final thing to do is to temporarily incre
 
 This can be done by changing the configured value for the memory limit in the update service agent manifest on each node and restarting the ALM agent. To do so, set the expected values at the top of this script in MB (existing suggested values are warning: 5.5GB and error: 6GB) and run this script **on every cluster node**.
 
+From the 2701 release there is no ALM agent and no `C:\Agents\AgentManifests` folder. The Resource Governor Agent reads the update service limits from `AgentManifest.json` in the update service package folder under `C:\NugetStore`, and those limits already are the suggested values (warning 5632 MB, error 6144 MB). On these releases the script reads that file on each node and changes nothing: it reports the limits, or stops if they are lower than the values at the top of the script. Don't edit files in `C:\NugetStore`; if the limits are lower, contact Microsoft Support.
+
 > [!NOTE]
-> The maximum value allowed by ALM resource governance is **8GB (8192 MB)**. If the configured error limit exceeds this, the next Solution update will fail at patching the update service. If the error limit is configured higher than 8GB temporarily, it must be reset down to 8192 or lower before taking the next Solution update.
+> On releases before 2701, the maximum value allowed by ALM resource governance is **8GB (8192 MB)**. If the configured error limit exceeds this, the next Solution update will fail at patching the update service. If the error limit is configured higher than 8GB temporarily, it must be reset down to 8192 or lower before taking the next Solution update.
 
 ```powershell
 $nodes = Get-ClusterNode | % Name
@@ -159,6 +163,33 @@ Invoke-Command -ComputerName $nodes -ScriptBlock {
     if ($memoryErrorLimit -lt $memoryWarningLimit)
     {
         throw "[$($env:ComputerName)] Warning limit ($memoryWarningLimit) must be lower than the Error limit $($memoryErrorLimit)"
+    }
+
+    if (-not (Test-Path "C:\Agents\AgentManifests"))
+    {
+        # 2701 and later: no ALM. Read the limits the Resource Governor Agent uses from the update service package.
+        $updateService = Get-CimInstance -ClassName Win32_Service -Filter "Name='Azure Stack HCI Update Service'"
+        if (-not $updateService -or $updateService.PathName -notmatch '^"?([^"]+\.exe)')
+        {
+            throw "[$($env:ComputerName)] Unable to find the Azure Stack HCI Update Service on this node"
+        }
+        $packageManifest = Join-Path (Split-Path $Matches[1] -Parent) "AgentManifest.json"
+        if (-not (Test-Path $packageManifest))
+        {
+            throw "[$($env:ComputerName)] Unable to find the update service agent manifest at $packageManifest"
+        }
+        $limits = @{}
+        Select-String -Path $packageManifest -Pattern '"(WarningMemoryLimitMB|ErrorMemoryLimitMB)"\s*:\s*(\d+)' |
+            ForEach-Object { $limits[$_.Matches[0].Groups[1].Value] = [int]$_.Matches[0].Groups[2].Value }
+        if ($limits["WarningMemoryLimitMB"] -ge $memoryWarningLimit -and $limits["ErrorMemoryLimitMB"] -ge $memoryErrorLimit)
+        {
+            Write-Host "[$($env:ComputerName)] No changes needed. $packageManifest sets Warning limit $($limits["WarningMemoryLimitMB"])MB and Error limit $($limits["ErrorMemoryLimitMB"])MB"
+        }
+        else
+        {
+            throw "[$($env:ComputerName)] $packageManifest sets Warning limit $($limits["WarningMemoryLimitMB"])MB and Error limit $($limits["ErrorMemoryLimitMB"])MB, lower than the suggested values. Don't edit this file; contact Microsoft Support."
+        }
+        return
     }
 
     $updateAgentManifestFileName = ls "C:\Agents\AgentManifests\*Update Service*"
