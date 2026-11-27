@@ -24,13 +24,17 @@ Name                                         OwnerNode State
 Azure Stack HCI Update Service Cluster Group Node01    Online
 ```
 
-Run the following commands to find events indicating that the update service was terminated due to exceeding the memory limit:
+Run the following commands on that node to find events from the last 24 hours indicating that the update service was terminated due to exceeding the memory limit:
 
 ```powershell
-Get-WinEvent -LogName Application | where ProviderName -eq "AzureStack Agent Lifecycle Agent" | where Message -match "Azure Stack HCI Update Service: Memory Error Limit Reached"
+$since = (Get-Date).AddHours(-24)
+Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'AzureStack Agent Lifecycle Agent'; StartTime = $since } -ErrorAction SilentlyContinue |
+    Where-Object Message -match 'Azure Stack HCI Update Service: Memory Error Limit Reached'
 ```
 
-Sample output. Note the `TimeCreated` value to determine that these are recent, relevant events. If the event times are not recent they are likely not relevant:
+One or more events confirm the issue: the update service is being terminated while preparation runs. If the command returns nothing, the update service has not been terminated for exceeding its memory limit in the last 24 hours, and older events alone do not confirm this issue.
+
+Sample output:
 ```
    ProviderName: AzureStack Agent Lifecycle Agent
 
@@ -218,7 +222,7 @@ Invoke-Command -ComputerName $nodes -ScriptBlock {
 
 # Verify the fix
 
-After you apply a mitigation, run the event query from [Issue Validation](#issue-validation) again on the node that owns the `Azure Stack HCI Update Service Cluster Group`. No new `Memory Error Limit Reached` events should appear with a `TimeCreated` later than the time you applied the mitigation. Then confirm that the update preparation continues past the health check:
+After you apply a mitigation and the update preparation has run again, run the event query from [Issue Validation](#issue-validation) again on the node that owns the `Azure Stack HCI Update Service Cluster Group`. No event should have a `TimeCreated` later than the time you applied the mitigation. Then confirm that the update preparation continues past the health check:
 
 ```powershell
 Get-SolutionUpdate | Format-Table DisplayName, State
