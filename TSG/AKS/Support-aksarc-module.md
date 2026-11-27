@@ -142,110 +142,11 @@ elseif (@($vmTest | Where-Object { $_.Status -in 'Failed', 'Error' }).Count -gt 
 else { 'NO-VM-REMOVAL' }
 ```
 
-- `NO-VM-REMOVAL`: save and compare the list as described below, and then run the command.
-- `VM-REMOVAL-PENDING`: the command below would stop and remove the VMs that the message lists, and any other VM whose name contains one of those names. Run the next check to see every VM it would remove.
+- `NO-VM-REMOVAL`: the fix would remove no VMs. Run the command below right away, in the same window. If time has passed since this check, run the check again first, and run the command only if it still prints `NO-VM-REMOVAL`.
+- `VM-REMOVAL-PENDING`: the command below would stop and remove the VMs that the message lists, and any other VM whose name contains one of those names. Don't run it yet. Follow [If the fix would remove VMs](#if-the-fix-would-remove-vms).
 - `TEST-DID-NOT-RUN`: the test ran no checks. Use the results table above to find out why.
 
-If the check printed `VM-REMOVAL-PENDING`, run this in the same PowerShell window. It lists every cluster role and Hyper-V VM that the fix would stop and remove, matched the same way the fix matches them, and changes nothing. Its last line is `VM-LIST-COMPLETE` only if it checked every machine that is `Up`.
-
-**Stop here and confirm.** Before anyone runs the command below, the owner of the VMs reviews the list this check prints and decides whether every VM on it can be removed. Done looks like: the last line is `VM-LIST-COMPLETE`, and the owner has confirmed each listed VM by name.
-
-```powershell
-$listComplete = $true
-try {
-    $pending = @($vmTest | Where-Object { $_.Status -in 'Failed', 'Error' })
-    $names = @($pending | ForEach-Object { $_.AffectedVMs } | ForEach-Object { $_.VMName })
-    if ($vmTest.Count -eq 0) { $listComplete = $false; 'VM-LIST-ERROR: run the check above first, in this window.' }
-    elseif ($pending.Count -eq 0) { 'NO-VM-REMOVAL-PENDING' }
-    elseif ($names.Count -eq 0) { $listComplete = $false; 'VM-LIST-ERROR: the test result lists no VM names. Run the check above again in this window.' }
-    foreach ($name in $names) {
-        $groups = @(Get-ClusterGroup -ErrorAction Stop | Where-Object { $_.Name.Contains($name) })
-        if ($groups.Count -gt 0) { $groups | ForEach-Object { "MOC VM $name -> cluster role $($_.Name) on $($_.OwnerNode.Name)" } }
-        else {
-            $vms = @(); $notChecked = @()
-            foreach ($node in @(Get-ClusterNode -ErrorAction Stop | Where-Object { $_.State -eq 'Up' } | ForEach-Object { $_.Name })) {
-                try { $vms += @(Get-VM -ComputerName $node -ErrorAction Stop | Where-Object { $_.Name -like "*$name*" } | ForEach-Object { "MOC VM $name -> Hyper-V VM $($_.Name) on $node" }) }
-                catch { $notChecked += "MOC VM $name -> NOT CHECKED on ${node}: $($_.Exception.Message)" }
-            }
-            $vms; $notChecked
-            if ($notChecked.Count -gt 0) { $listComplete = $false }
-            elseif ($vms.Count -eq 0) { "MOC VM $name -> no matching cluster role or Hyper-V VM found" }
-        }
-    }
-} catch { $listComplete = $false; "VM-LIST-ERROR: $($_.Exception.Message)" }
-if ($listComplete) { 'VM-LIST-COMPLETE' } else { 'VM-LIST-INCOMPLETE' }
-```
-
-- If it prints `NO-VM-REMOVAL-PENDING` and then `VM-LIST-COMPLETE`, the fix would remove no VMs, and there is nothing for the owner to confirm.
-- If the last line is `VM-LIST-COMPLETE` and the owner confirmed that every VM it lists can be removed, save and compare the list as described next, and then run the command below.
-- If the last line is `VM-LIST-INCOMPLETE`, the list is missing at least one machine: a `NOT CHECKED` line names the machine it couldn't query, or a `VM-LIST-ERROR` line shows why the check stopped. Don't run the command below, and don't approve removing any VM, until every machine is checked. Fix the reason shown, for example Hyper-V access to that machine, and run this check again.
-- If any VM it lists isn't one you intend to remove, or you aren't sure, stop. Don't run the command below. Contact Microsoft Support before you remove any VM. You can still run the block that skips that test, after the command below, to fix the other failed tests.
-
-The command matches VMs by name when it runs, so a VM created, renamed, or moved after the owner approved the list can be removed too. Save the approved list now, in the same window. Run this even if the first check printed `NO-VM-REMOVAL`; it then saves an empty list. It reruns the test and the name matching, and changes nothing:
-
-```powershell
-$getVmRemovalList = {
-    $lines = @(); $complete = $true
-    try {
-        $test = @(Test-SupportAksArcKnownIssues -TestId MOC-0017)
-        $pending = @($test | Where-Object { $_.Status -in 'Failed', 'Error' })
-        $names = @($pending | ForEach-Object { $_.AffectedVMs } | ForEach-Object { $_.VMName })
-        if ($test.Count -eq 0) { $complete = $false; $lines += 'ERROR: the test ran no checks.' }
-        elseif ($pending.Count -gt 0 -and $names.Count -eq 0) { $complete = $false; $lines += 'ERROR: the test result lists no VM names.' }
-        foreach ($name in $names) {
-            $groups = @(Get-ClusterGroup -ErrorAction Stop | Where-Object { $_.Name.Contains($name) })
-            if ($groups.Count -gt 0) { $lines += @($groups | ForEach-Object { "MOC VM $name -> cluster role $($_.Name)" }) }
-            else {
-                $found = 0; $notChecked = 0
-                foreach ($node in @(Get-ClusterNode -ErrorAction Stop | Where-Object { $_.State -eq 'Up' } | ForEach-Object { $_.Name })) {
-                    try {
-                        $vms = @(Get-VM -ComputerName $node -ErrorAction Stop | Where-Object { $_.Name -like "*$name*" })
-                        $found += $vms.Count
-                        $lines += @($vms | ForEach-Object { "MOC VM $name -> Hyper-V VM $($_.Name) on $node" })
-                    } catch { $notChecked++; $complete = $false; $lines += "ERROR: MOC VM $name -> NOT CHECKED on ${node}: $($_.Exception.Message)" }
-                }
-                if ($found -eq 0 -and $notChecked -eq 0) { $lines += "MOC VM $name -> no matching cluster role or Hyper-V VM found" }
-            }
-        }
-    } catch { $complete = $false; $lines += "ERROR: $($_.Exception.Message)" }
-    [pscustomobject]@{ Complete = $complete; Lines = @($lines | Sort-Object -Unique) }
-}
-$approvedVmList = $null; $vmListUnchanged = $false
-$saved = & $getVmRemovalList
-$saved.Lines
-if (-not $saved.Complete) { 'VM-LIST-NOT-SAVED' }
-else {
-    $approvedVmList = @($saved.Lines)
-    if ($approvedVmList.Count -eq 0) { 'NO-VM-REMOVAL-PENDING' }
-    'VM-LIST-SAVED'
-}
-```
-
-- `VM-LIST-SAVED`: the lines above it are the saved list, one line per VM the command would remove. Compare them with the list the owner approved. If any VM is on this list but not on the approved one, stop, and get a new approval for this list before you go on. With `NO-VM-REMOVAL-PENDING`, the command would remove no VMs.
-- `VM-LIST-NOT-SAVED`: an `ERROR` line shows why the list isn't complete. Don't run the command below. Fix the reason shown, and run the checks from [Test for issues with remediation](#test-for-issues-with-remediation) again.
-
-**Plan for:** between the owner's approval and the command below, don't create, rename, or migrate VMs on the instance, and don't let anyone else do so. Any of these can change which VMs the command matches.
-
-Immediately before you run the command, run this check in the same window. It compares the VMs the command would remove now with the saved list, and changes nothing:
-
-```powershell
-$vmListUnchanged = $false
-try {
-    if ($null -eq $getVmRemovalList -or $null -eq $approvedVmList) { throw 'no saved list in this window. Run the block that saves the list first.' }
-    $now = & $getVmRemovalList
-    $added = @($now.Lines | Where-Object { $approvedVmList -notcontains $_ })
-    $gone = @($approvedVmList | Where-Object { $now.Lines -notcontains $_ })
-    if (-not $now.Complete) { 'VM-LIST-RECHECK-ERROR'; $now.Lines | Where-Object { $_ -like 'ERROR:*' } }
-    elseif ($added.Count -gt 0 -or $gone.Count -gt 0) { 'VM-LIST-CHANGED'; $added | ForEach-Object { "NEW: $_" }; $gone | ForEach-Object { "GONE: $_" } }
-    else { $vmListUnchanged = $true; 'VM-LIST-UNCHANGED' }
-} catch { "VM-LIST-RECHECK-ERROR: $($_.Exception.Message)" }
-```
-
-- `VM-LIST-UNCHANGED`: the command would remove exactly the approved VMs. Run the command below now, in the same window.
-- `VM-LIST-CHANGED`: a `NEW` line is a VM the command would now remove that the owner didn't approve, and a `GONE` line is an approved VM it no longer matches. Don't run the command below. Run the checks from [Test for issues with remediation](#test-for-issues-with-remediation) again, and get a new approval.
-- `VM-LIST-RECHECK-ERROR`: the check couldn't list every VM. Don't run the command below. Fix the reason shown, and run this check again.
-
-If you don't get a new approval, you can still run the block that skips that test, after the command below, to fix the other failed tests.
+Run this command only after the check printed `NO-VM-REMOVAL`. If it printed `VM-REMOVAL-PENDING`, run the command from [Run the fix after the owner approves](#run-the-fix-after-the-owner-approves) instead, right after the list is checked again.
 
 ```powershell
 if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Run this command in Windows PowerShell 5.1 (powershell.exe), not PowerShell 7.' }
@@ -255,7 +156,7 @@ Invoke-SupportAksArcRemediation
 
 For each test, the command prints either `No remediation required for <test>.`, or `Remediation for <test> is required.` and then `Remediation for <test> succeeded.` or the warning `Remediation for <test> failed.` Two tests have no automatic fix; see [If a test has no automatic fix](#if-a-test-has-no-automatic-fix).
 
-If the check printed `VM-REMOVAL-PENDING` and you didn't run the command above, run this block instead. It fixes every failed test except `Validate Virtual Machine Stuck In Deleting Due To OS Disk Lock`, which removes VMs. It runs the test and reads each test's ID from its `Running test: <test name> with ID: <ID>` line. Then it runs the remediation for each test that failed, had an error, or stopped the run as a critical test, except `MOC-0017`. It prints:
+If the check printed `VM-REMOVAL-PENDING` and you didn't run the command, run this block instead. It fixes every failed test except `Validate Virtual Machine Stuck In Deleting Due To OS Disk Lock`, which removes VMs. It runs the test and reads each test's ID from its `Running test: <test name> with ID: <ID>` line. Then it runs the remediation for each test that failed, had an error, or stopped the run as a critical test, except `MOC-0017`. It prints:
 
 - `REMEDIATE <ID>` before each fix;
 - `SKIPPED MOC-0017` if it left that test alone;
@@ -283,6 +184,104 @@ foreach ($id in $failed) {
     Invoke-SupportAksArcRemediation -TestId $id
 }
 ```
+
+#### If the fix would remove VMs
+
+Run this when the check in [Test for issues with remediation](#test-for-issues-with-remediation) printed `VM-REMOVAL-PENDING`. It runs that test again and lists every cluster role and Hyper-V VM that the fix would stop and remove, matched the same way the fix matches them. It changes nothing. Its last line is `VM-LIST-COMPLETE` only if it checked every machine that is `Up`. Keep this PowerShell window open; the steps after it use the list it keeps.
+
+```powershell
+$getVmRemovalList = {
+    $lines = @(); $complete = $true
+    try {
+        $vmTest = @(Test-SupportAksArcKnownIssues -TestId MOC-0017)
+        $pending = @($vmTest | Where-Object { $_.Status -in 'Failed', 'Error' })
+        $names = @($pending | ForEach-Object { $_.AffectedVMs } | ForEach-Object { $_.VMName })
+        if ($vmTest.Count -eq 0) { $complete = $false; $lines += 'VM-LIST-ERROR: the test ran no checks.' }
+        elseif ($pending.Count -gt 0 -and $names.Count -eq 0) { $complete = $false; $lines += 'VM-LIST-ERROR: the test result lists no VM names.' }
+        foreach ($name in $names) {
+            $groups = @(Get-ClusterGroup -ErrorAction Stop | Where-Object { $_.Name.Contains($name) })
+            if ($groups.Count -gt 0) { $lines += @($groups | ForEach-Object { "MOC VM $name -> cluster role $($_.Name)" }) }
+            else {
+                $found = 0; $notChecked = 0
+                foreach ($node in @(Get-ClusterNode -ErrorAction Stop | Where-Object { $_.State -eq 'Up' } | ForEach-Object { $_.Name })) {
+                    try {
+                        $vms = @(Get-VM -ComputerName $node -ErrorAction Stop | Where-Object { $_.Name -like "*$name*" })
+                        $found += $vms.Count
+                        $lines += @($vms | ForEach-Object { "MOC VM $name -> Hyper-V VM $($_.Name) on $node" })
+                    } catch { $notChecked++; $complete = $false; $lines += "VM-LIST-ERROR: MOC VM $name -> NOT CHECKED on ${node}: $($_.Exception.Message)" }
+                }
+                if ($found -eq 0 -and $notChecked -eq 0) { $lines += "MOC VM $name -> no matching cluster role or Hyper-V VM found" }
+            }
+        }
+    } catch { $complete = $false; $lines += "VM-LIST-ERROR: $($_.Exception.Message)" }
+    [pscustomobject]@{ Complete = $complete; Lines = @($lines | Sort-Object -Unique) }
+}
+$shownVmList = & $getVmRemovalList
+$shownVmList.Lines
+if ($shownVmList.Complete -and $shownVmList.Lines.Count -eq 0) { 'NO-VM-REMOVAL-PENDING' }
+if ($shownVmList.Complete) { 'VM-LIST-COMPLETE' } else { 'VM-LIST-INCOMPLETE' }
+```
+
+- If it prints `NO-VM-REMOVAL-PENDING` and then `VM-LIST-COMPLETE`, the fix would now remove no VMs, and there is nothing for the owner to confirm. Continue with [Run the fix after the owner approves](#run-the-fix-after-the-owner-approves), which saves the empty list and checks it again just before the command.
+- If the last line is `VM-LIST-COMPLETE` and it lists VMs, the owner reviews the list as described below.
+- If the last line is `VM-LIST-INCOMPLETE`, the list is missing at least one machine: a `NOT CHECKED` line names the machine it couldn't query, or another `VM-LIST-ERROR` line shows why the check stopped. Don't run the command in [Test for issues with remediation](#test-for-issues-with-remediation), and don't approve removing any VM, until every machine is checked. Fix the reason shown, for example Hyper-V access to that machine, and run this check again.
+- If any VM it lists isn't one you intend to remove, or you aren't sure, stop. Don't run the command in [Test for issues with remediation](#test-for-issues-with-remediation). Contact Microsoft Support before you remove any VM. You can still run the block that skips that test, in [Test for issues with remediation](#test-for-issues-with-remediation), to fix the other failed tests.
+
+**Stop here and confirm.** Before anyone runs the remediation command, the owner of the VMs reviews the list this check printed and decides whether every VM on it can be removed. Done looks like: the last line is `VM-LIST-COMPLETE`, and the owner has confirmed by name that each listed VM can be removed. Then continue with [Run the fix after the owner approves](#run-the-fix-after-the-owner-approves).
+
+##### Run the fix after the owner approves
+
+The command matches VMs by name when it runs, so a VM created, renamed, or moved after the owner approved the list can be removed too. Save the approved list now, in the same window as the list. It saves exactly the list the owner reviewed, and changes nothing:
+
+```powershell
+$approvedVmList = $null; $vmListUnchanged = $false
+if ($null -eq $shownVmList -or $null -eq $getVmRemovalList) { 'VM-LIST-NOT-SAVED: there is no list in this window.' }
+elseif (-not $shownVmList.Complete) { 'VM-LIST-NOT-SAVED: the list is incomplete.' }
+else {
+    $approvedVmList = @($shownVmList.Lines)
+    $approvedVmList
+    if ($approvedVmList.Count -eq 0) { 'NO-VM-REMOVAL-PENDING' }
+    'VM-LIST-SAVED'
+}
+```
+
+- `VM-LIST-SAVED`: the lines above it are the saved list, one line per VM the command would remove. They're the list the owner approved. With `NO-VM-REMOVAL-PENDING`, the command would remove no VMs.
+- `VM-LIST-NOT-SAVED`: this window has no complete list. Don't run the command. Run the check in [If the fix would remove VMs](#if-the-fix-would-remove-vms) again in this window, and get the owner's confirmation for the list it prints.
+
+**Plan for:** between the owner's approval and the command below, don't create, rename, or migrate VMs on the instance, and don't let anyone else do so. Any of these can change which VMs the command matches.
+
+Immediately before you run the command, run this check in the same window. It compares the VMs the command would remove now with the saved list, and changes nothing:
+
+```powershell
+$vmListUnchanged = $false
+try {
+    if ($null -eq $getVmRemovalList -or $null -eq $approvedVmList) { throw 'no saved list in this window. Run the block that saves the list first.' }
+    $now = & $getVmRemovalList
+    $added = @($now.Lines | Where-Object { $approvedVmList -notcontains $_ })
+    $gone = @($approvedVmList | Where-Object { $now.Lines -notcontains $_ })
+    if (-not $now.Complete) { 'VM-LIST-RECHECK-ERROR'; $now.Lines | Where-Object { $_ -like 'VM-LIST-ERROR:*' } }
+    elseif ($added.Count -gt 0 -or $gone.Count -gt 0) { 'VM-LIST-CHANGED'; $added | ForEach-Object { "NEW: $_" }; $gone | ForEach-Object { "GONE: $_" } }
+    else { $vmListUnchanged = $true; 'VM-LIST-UNCHANGED' }
+} catch { "VM-LIST-RECHECK-ERROR: $($_.Exception.Message)" }
+```
+
+- `VM-LIST-UNCHANGED`: the command would remove exactly the approved VMs. Run the command below now, in the same window.
+- `VM-LIST-CHANGED`: a `NEW` line is a VM the command would now remove that the owner didn't approve, and a `GONE` line is an approved VM it no longer matches. Don't run the command below. Run the check in [If the fix would remove VMs](#if-the-fix-would-remove-vms) again, and get a new approval.
+- `VM-LIST-RECHECK-ERROR`: the check couldn't list every VM. Don't run the command below. Fix the reason shown, and run this check again.
+
+If you don't get a new approval, you can still run the block that skips that test, in [Test for issues with remediation](#test-for-issues-with-remediation), to fix the other failed tests.
+
+The command runs only right after this check printed `VM-LIST-UNCHANGED` in the same window; otherwise it stops with an error and changes nothing:
+
+```powershell
+if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Run this command in Windows PowerShell 5.1 (powershell.exe), not PowerShell 7.' }
+$listChecked = $vmListUnchanged; $vmListUnchanged = $false
+if (-not $listChecked) { throw 'Run the check above first, in this window. Run this command only right after it prints VM-LIST-UNCHANGED.' }
+Invoke-SupportAksArcRemediation
+
+```
+
+It prints the results described in [Test for issues with remediation](#test-for-issues-with-remediation). Then continue with [If a test has no automatic fix](#if-a-test-has-no-automatic-fix).
 
 ### If a test has no automatic fix
 
