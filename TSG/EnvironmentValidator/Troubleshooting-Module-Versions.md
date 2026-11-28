@@ -38,6 +38,7 @@
 | 2026-11-20 | Corrected the expected inbox module path and the Issue Validation command. Added the error that newer builds show, steps for module files that are still in use, commands for all machines, and guidance to verify, escalate, and prevent the problem. Added the metadata marker. Step 1 now lists every PowerShell session that could hold the external copy's files, including remote sessions, and the impact labels are replaced with plain statements of what each step changes. |
 | 2026-11-26 | Step 1 now names the exact processes that hold the files, Step 2 stops only the user PowerShell sessions from that reviewed list while no update is running, and new scripts check every reachable machine and resume an update that failed with this error. Step 2 and Step 6 now stop when they cannot tell whether the machine is in a cluster, and the retry script resumes an update only when a failed step shows the error. |
 | 2026-11-27 | Step 1 saves its list in a folder that only administrators can change, and Step 2 reads it from there, so each step can run in its own PowerShell window or process. Step 2 stops a window only when it can trace it back to the SConfig menu, the command prompt that opens at sign-in, or File Explorer, and it checks that it is still the same process before it stops it. Step 3 now says where to stop and confirm, Step 4 again checks the files directly and reports a file that it cannot open, and a machine with only a leftover folder follows all the steps. |
+| 2026-11-28 | Steps 1 and 2 now treat the PowerShell window that started the script the same as the window it runs in, so Step 2 never stops it. Step 3 no longer asks to close the processes that Step 1 says to leave running, and says when it is done. The all-machines check, Verify the fix, and the retry script now tell whether the machine is in a cluster the same way as Step 2: when they cannot tell, they say so instead of treating the cluster as not deployed, and the retry script retries nothing. Step 2's description now says plainly in which case it treats a machine as not deployed. |
 
 ## At a glance
 
@@ -137,7 +138,7 @@ Run this in an elevated PowerShell session on each machine. It changes nothing. 
 }
 ```
 
-To check every machine at once, run this from one machine. It checks this machine and every other machine of the cluster that it can reach with PowerShell remoting, and prints one result for each machine. A machine that it cannot reach shows `Not checked from here`; run the single-machine check above on that machine. Before the cluster exists (during deployment), it checks only this machine, so run the single-machine check on each machine.
+To check every machine at once, run this from one machine. It checks this machine and every other machine of the cluster that it can reach with PowerShell remoting, and prints one result for each machine. A machine that it cannot reach shows `Not checked from here`; run the single-machine check above on that machine. Before the cluster exists (during deployment), it checks only this machine, so run the single-machine check on each machine. If it cannot tell whether this machine is in a cluster, it prints `CLUSTER_STATE_UNKNOWN` first and checks only this machine.
 
 ```powershell
 & {
@@ -154,9 +155,16 @@ To check every machine at once, run this from one machine. It checks this machin
         else { $result = 'NOT_AFFECTED' }
         [pscustomobject]@{ Result = $result; ExternalCopies = ($external -join '; '); VersionFolders = ($folders -join '; ') }
     }
-    $clusterExists = $true
-    $nodes = @($env:COMPUTERNAME)
-    try { $nodes = @((Get-ClusterNode -ErrorAction Stop).Name) } catch { $clusterExists = $false }
+    $clusterNote = 'Get-ClusterNode returned no machines.'
+    $nodes = @()
+    try { $nodes = @(Get-ClusterNode -ErrorAction Stop | ForEach-Object { "$($_.Name)" }) } catch { $clusterNote = $_.Exception.Message }
+    $hasClusSvc = $true
+    $hasClusDb = $true
+    if ($nodes.Count -eq 0) {
+        try { $hasClusSvc = @(Get-CimInstance -ClassName Win32_Service -Filter "Name = 'ClusSvc'" -ErrorAction Stop).Count -gt 0 } catch { }
+        try { $null = Get-Item -LiteralPath (Join-Path $env:SystemRoot 'Cluster\CLUSDB') -Force -ErrorAction Stop } catch [System.Management.Automation.ItemNotFoundException] { $hasClusDb = $false } catch { }
+    }
+    $inCluster = if ($nodes.Count -gt 0) { 'Yes' } elseif ($hasClusSvc -and $hasClusDb) { 'Unknown' } else { 'No' }
     if ($nodes -notcontains $env:COMPUTERNAME) { $nodes = @($env:COMPUTERNAME) + $nodes }
     $rows = @(foreach ($node in $nodes) {
         try {
@@ -167,7 +175,12 @@ To check every machine at once, run this from one machine. It checks this machin
             [pscustomobject]@{ Machine = $node; Result = 'Not checked from here'; ExternalCopies = ''; VersionFolders = ''; Note = $_.Exception.Message }
         }
     })
-    if (-not $clusterExists) { 'The cluster does not exist yet, so only this machine was checked. Run the single-machine check on each machine.' }
+    if ($inCluster -eq 'Unknown') {
+        Write-Output 'CLUSTER_STATE_UNKNOWN'
+        "Could not tell whether this machine is in a cluster, so only this machine was checked: $clusterNote"
+        'Run this check on another machine of the cluster.'
+    }
+    elseif ($inCluster -eq 'No') { 'The cluster does not exist yet, so only this machine was checked. Run the single-machine check on each machine.' }
     $rows | Format-List Machine, Result, ExternalCopies, VersionFolders, Note
 }
 ```
@@ -181,6 +194,7 @@ How to read the result for each machine. The all-machines check prints the same 
 | `NOT_AFFECTED` | This machine is not affected. | None. |
 | `INBOX_MODULE_MISSING` | The inbox module is missing. | Stop and [contact Microsoft support](#when-to-contact-microsoft-support). Do not install a replacement. The cleanup scripts in Steps 5 and 7 remove nothing on a machine without the inbox module, and the retry script retries nothing. |
 | `Not checked from here` | All-machines check only: PowerShell remoting to that machine failed, so it was not checked. This does not mean that it is affected. `Note` shows the reason. | Run the single-machine check on that machine. |
+| `CLUSTER_STATE_UNKNOWN` | All-machines check only, printed before the results: `Get-ClusterNode` failed or returned no machines, and the script could not confirm that the Cluster service is not installed or that the machine has no cluster database, so it could not tell whether this machine is in a cluster and checked only this machine. The line after it shows the reason. | Read this machine's `Result` as the other rows say. Then run the all-machines check on another machine of the cluster. If every machine prints this, run the single-machine check on each machine. |
 
 ## Mitigation Details
 
@@ -190,7 +204,7 @@ Run these steps in order on each affected machine. Step 2 uses the list that Ste
 
 This step asks Windows Restart Manager which processes hold files in the external copy's folders, including a copy outside `C:\Program Files`, for example one installed for the current user only, and in leftover version-number folders, lists each one with its owner, sign-in session, start time, Windows service, and command line, and says in `NextStep` what to do about it. `Get-Process` does not show these files, because PowerShell loads the module's .NET files in a way that it does not list. Remote PowerShell sessions appear as `wsmprovhost`.
 
-The script marks a process `Step 2 stops it.` only if it is a PowerShell window (`powershell`, `powershell_ise`, or `pwsh`) that a person started: it does not run as SYSTEM, LocalService, NetworkService, or an account that runs a Windows service, does not run or belong to a Windows service, is in a signed-in user's session, and was opened by a person signed in to this machine: its parent processes in that session lead back to the SConfig menu or the command prompt that opens when you sign in to the machine, or to File Explorer on a machine with the desktop, with no service, Task Scheduler, WMI, or remote session host between them. If Step 1 cannot confirm that, for example because a parent process has already ended, it does not mark the window, and you close it in Step 3. It never marks a remote session (`wsmprovhost`), because Azure Local's own operations also run in remote sessions, and the two look the same. It saves the list, with each process's ID, start time, name, owner, and whether it is marked, for Step 2. If it cannot save the list, it says so after its result line, and Step 2 stops nothing.
+The script marks a process `Step 2 stops it.` only if it is a PowerShell window (`powershell`, `powershell_ise`, or `pwsh`) that a person started: it does not run as SYSTEM, LocalService, NetworkService, or an account that runs a Windows service, does not run or belong to a Windows service, is in a signed-in user's session, and was opened by a person signed in to this machine: its parent processes in that session lead back to the SConfig menu or the command prompt that opens when you sign in to the machine, or to File Explorer on a machine with the desktop, with no service, Task Scheduler, WMI, or remote session host between them. If Step 1 cannot confirm that, for example because a parent process has already ended, it does not mark the window, and you close it in Step 3. It never marks a remote session (`wsmprovhost`), because Azure Local's own operations also run in remote sessions, and the two look the same. It never marks the PowerShell window that it runs in, or the window that started it, for example when you run it as a new process from your window: it tells you to close that window, open a new one, and start again at Step 1. It saves the list, with each process's ID, start time, name, owner, and whether it is marked, for Step 2. If it cannot save the list, it says so after its result line, and Step 2 stops nothing.
 
 **Changes:** saves the list to `Step1List.json` in the folder `C:\ProgramData\AzStackHci.EnvironmentChecker.Step1`, replacing an earlier list. It creates the folder if needed and sets its permissions so that only Administrators and SYSTEM can change it. When no process holds the files, it deletes the folder and saves nothing. Step 2 deletes the folder when it ends. Nothing else changes.
 
@@ -272,6 +286,14 @@ public static class EnvCheckerFileHolders {
         })
         $byId = @{}
         foreach ($p in @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)) { $byId[[int]$p.ProcessId] = $p }
+        $self = @([int]$PID)
+        $selfChild = $byId[[int]$PID]
+        for ($depth = 0; $selfChild -and $depth -lt 16; $depth++) {
+            $selfUp = $byId[[int]$selfChild.ParentProcessId]
+            if (-not $selfUp -or ($selfUp.CreationDate -gt $selfChild.CreationDate) -or ($self -contains [int]$selfUp.ProcessId)) { break }
+            $self += [int]$selfUp.ProcessId
+            $selfChild = $selfUp
+        }
         $hostNames = 'services.exe', 'svchost.exe', 'taskhostw.exe', 'taskeng.exe', 'wmiprvse.exe', 'wsmprovhost.exe', 'winrshost.exe'
         $isHost = { param($q) ($q.SessionId -ne $process.SessionId) -or ($servicePids -contains $q.ProcessId) -or ($hostNames -contains $q.Name) }
         foreach ($id in $holderIds) {
@@ -298,7 +320,7 @@ public static class EnvCheckerFileHolders {
             $isPowerShell = 'powershell', 'pwsh', 'powershell_ise' -contains $name
             $canStop = $isPowerShell -and $userAccount -and -not $hostsService -and ($origin -eq 'SignIn') -and ($process.SessionId -ne 0)
             $why = if ($isPowerShell -and $origin -eq 'Unknown') { 'Step 2 could not confirm that a person signed in to this machine opened it, so it does not stop it. ' } else { '' }
-            if ($id -eq $PID) { $canStop = $false; $next = 'This PowerShell window holds the files. Close it, open a new window, and start again at Step 1.' }
+            if ($self -contains [int]$id) { $canStop = $false; $next = 'This PowerShell window, or the window that started this script, holds the files. Close it, open a new window, and start again at Step 1.' }
             elseif ($canStop) { $next = 'Step 2 stops it.' }
             elseif ($name -eq 'wsmprovhost' -and $userAccount -and -not $hostsService) { $next = "Remote PowerShell session of $ownerName. Ask them to end it on the computer that opened it. If no one can, leave it running; Step 5 removes what it can." }
             elseif (-not $userAccount -or $hostsService -or ($origin -eq 'Service')) { $next = 'It runs as or for a Windows service, or a service such as Task Scheduler started it. Leave it running; Step 5 removes what it can, and Step 6 says whether a restart is needed.' }
@@ -382,9 +404,9 @@ public static class EnvCheckerFileHolders {
 
 ### Step 2: Stop the PowerShell sessions that hold the files
 
-Run this after you have read the Step 1 list, in any PowerShell window on the same machine. It reads the list that Step 1 saved and stops a process only if Step 1 marked it `Step 2 stops it.`, it is the same process (same process ID and start time), it still holds the files, and the same check that Step 1 runs still marks it. It uses a list only if it was written in the last 60 minutes and only Administrators and SYSTEM can change the list and its folder, and it deletes the folder when it ends, whatever it prints, so each list is used once. Just before it stops a process, it opens that process and checks its start time again, and it stops it through that same handle, so a process that reused the ID is never stopped. On a deployed system it first reads the solution update state and stops nothing while an update or a health check is running. It treats the machine as not yet deployed only when the Cluster service (ClusSvc) is not installed or the machine has no cluster database (`%SystemRoot%\Cluster\CLUSDB`), which every cluster member keeps. If `Get-ClusterNode` fails and neither is confirmed, it stops nothing. It cannot check deployment, add node, or repair node operations, so confirm in the Azure portal that none is running. If the list includes another person's session, ask them before you run this step.
+Run this after you have read the Step 1 list, in any PowerShell window on the same machine. It reads the list that Step 1 saved and stops a process only if Step 1 marked it `Step 2 stops it.`, it is the same process (same process ID and start time), it still holds the files, and the same check that Step 1 runs still marks it. It uses a list only if it was written in the last 60 minutes and only Administrators and SYSTEM can change the list and its folder, and it deletes the folder when it ends, whatever it prints, so each list is used once. Just before it stops a process, it opens that process and checks its start time again, and it stops it through that same handle, so a process that reused the ID is never stopped. On a deployed system it first reads the solution update state and stops nothing while an update or a health check is running. It treats the machine as not yet deployed when the Cluster service (ClusSvc) is not installed or the machine has no cluster database (`%SystemRoot%\Cluster\CLUSDB`), which every cluster member keeps, and in no other case. If `Get-ClusterNode` fails and neither is confirmed, it stops nothing. It cannot check deployment, add node, or repair node operations, so confirm in the Azure portal that none is running. If the list includes another person's session, ask them before you run this step.
 
-**Changes:** stops the PowerShell windows described above. Work that is not saved in them is lost. It does not stop the window you run it from, any service, or any other process. It deletes the folder with the list that Step 1 saved. Running VMs are not affected.
+**Changes:** stops the PowerShell windows described above. Work that is not saved in them is lost. It does not stop the window you run it from, the window that started it, any service, or any other process. It deletes the folder with the list that Step 1 saved. Running VMs are not affected.
 
 ```powershell
 & {
@@ -472,6 +494,14 @@ public static class EnvCheckerFileHolders {
             })
             $byId = @{}
             foreach ($p in @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)) { $byId[[int]$p.ProcessId] = $p }
+            $self = @([int]$PID)
+            $selfChild = $byId[[int]$PID]
+            for ($depth = 0; $selfChild -and $depth -lt 16; $depth++) {
+                $selfUp = $byId[[int]$selfChild.ParentProcessId]
+                if (-not $selfUp -or ($selfUp.CreationDate -gt $selfChild.CreationDate) -or ($self -contains [int]$selfUp.ProcessId)) { break }
+                $self += [int]$selfUp.ProcessId
+                $selfChild = $selfUp
+            }
             $hostNames = 'services.exe', 'svchost.exe', 'taskhostw.exe', 'taskeng.exe', 'wmiprvse.exe', 'wsmprovhost.exe', 'winrshost.exe'
             $isHost = { param($q) ($q.SessionId -ne $process.SessionId) -or ($servicePids -contains $q.ProcessId) -or ($hostNames -contains $q.Name) }
             foreach ($id in $holderIds) {
@@ -498,7 +528,7 @@ public static class EnvCheckerFileHolders {
                 $isPowerShell = 'powershell', 'pwsh', 'powershell_ise' -contains $name
                 $canStop = $isPowerShell -and $userAccount -and -not $hostsService -and ($origin -eq 'SignIn') -and ($process.SessionId -ne 0)
                 $why = if ($isPowerShell -and $origin -eq 'Unknown') { 'Step 2 could not confirm that a person signed in to this machine opened it, so it does not stop it. ' } else { '' }
-                if ($id -eq $PID) { $canStop = $false; $next = 'This PowerShell window holds the files. Close it, open a new window, and start again at Step 1.' }
+                if ($self -contains [int]$id) { $canStop = $false; $next = 'This PowerShell window, or the window that started this script, holds the files. Close it, open a new window, and start again at Step 1.' }
                 elseif ($canStop) { $next = 'Step 2 stops it.' }
                 elseif ($name -eq 'wsmprovhost' -and $userAccount -and -not $hostsService) { $next = "Remote PowerShell session of $ownerName. Ask them to end it on the computer that opened it. If no one can, leave it running; Step 5 removes what it can." }
                 elseif (-not $userAccount -or $hostsService -or ($origin -eq 'Service')) { $next = 'It runs as or for a Windows service, or a service such as Task Scheduler started it. Leave it running; Step 5 removes what it can, and Step 6 says whether a restart is needed.' }
@@ -632,7 +662,7 @@ public static class EnvCheckerFileHolders {
 
 Do this step only if Step 1 printed `OTHER_HOLDERS_FOUND`. For each process whose `NextStep` does not say `Step 2 stops it.`, do what its `NextStep` says. Contact the owner before you close anything of theirs. Never sign out session 0: it runs the Windows services and remote sessions.
 
-**Stop here and confirm.** The owner of each program that Step 1 listed, other than the PowerShell windows that Step 2 stops, confirms that it can be closed and closes it, or lets you close it. Then run Step 4, which prints `FILES_RELEASED` when no program holds the files.
+**Stop here and confirm.** The owner of each program that Step 1 listed, other than the PowerShell windows that Step 2 stops and the processes whose `NextStep` says to leave them running, confirms that it can be closed and closes it, or lets you close it. Then run Step 4. This step is done when Step 4 prints `FILES_RELEASED`, or when it prints `FILES_IN_USE` and running Step 1 again shows that only processes whose `NextStep` says to leave them running still hold the files.
 
 **Changes:** ends each program that you or its owner closes, and any work that is not saved in it. Signing a user out with `logoff` ends all of that user's programs in that session. Running VMs are not affected.
 
@@ -681,7 +711,7 @@ This step changes nothing. It opens each file in the folders that Step 1 checks 
 | Result | Meaning | Next step |
 | --- | --- | --- |
 | `FILES_RELEASED` | No file of the external copy is in use on this machine. | Go to Step 5. |
-| `FILES_IN_USE` | The script lists the files that are still in use. | Run Step 1 again to see which processes hold them. If it marks a process `Step 2 stops it.`, run Step 2 and then this step again. If it lists a process that you can close, close it as Step 3 describes and run this step again. If it lists only processes that you cannot close, go to Step 5 anyway: it removes everything it can, and Step 6 tells you whether a restart is needed. |
+| `FILES_IN_USE` | The script lists the files that are still in use. | Run Step 1 again to see which processes hold them. If it marks a process `Step 2 stops it.`, run Step 2 and then this step again. If it lists a process that you can close, close it as Step 3 describes and run this step again. If it lists only processes whose `NextStep` says to leave them running, go to Step 5: it removes everything it can, and Step 6 tells you whether a restart is needed. |
 | `NO_FILES_TO_CHECK` | This machine has no files in the external copy's folders. | Go to Step 5. |
 | `LOCK_CHECK_UNAVAILABLE` | The check could not open a file, for example because the file is read-only or this account is not allowed to open it, so it could not tell whether every file is released. The line after it names the file and the error. | Go to Step 5. It removes everything it can and reports any file that it cannot remove. |
 
@@ -822,7 +852,7 @@ If you restart the machine: **Changes:** restarts this machine and ends every pr
 
 ## Verify the fix
 
-Run this on one machine. It changes nothing. It checks this machine and every other machine of the cluster that it can reach with PowerShell remoting, and prints a result line. A machine that it cannot reach is reported as not checked from here, not as a problem: run this on that machine too. Before the cluster exists (during deployment), it checks only the machine it runs on, so run it on each machine. Paste or run the whole block at once.
+Run this on one machine. It changes nothing. It checks this machine and every other machine of the cluster that it can reach with PowerShell remoting, and prints a result line. A machine that it cannot reach is reported as not checked from here, not as a problem: run this on that machine too. Before the cluster exists (during deployment), it checks only the machine it runs on, so run it on each machine. If it cannot tell whether this machine is in a cluster, it checks only this machine and says so. Paste or run the whole block at once.
 
 ```powershell
 & {
@@ -837,9 +867,16 @@ Run this on one machine. It changes nothing. It checks this machine and every ot
             VersionFolders = @(Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -as [version] } | ForEach-Object { $_.FullName })
         }
     }
-    $clusterExists = $true
-    $nodes = @($env:COMPUTERNAME)
-    try { $nodes = @((Get-ClusterNode -ErrorAction Stop).Name) } catch { $clusterExists = $false }
+    $clusterNote = 'Get-ClusterNode returned no machines.'
+    $nodes = @()
+    try { $nodes = @(Get-ClusterNode -ErrorAction Stop | ForEach-Object { "$($_.Name)" }) } catch { $clusterNote = $_.Exception.Message }
+    $hasClusSvc = $true
+    $hasClusDb = $true
+    if ($nodes.Count -eq 0) {
+        try { $hasClusSvc = @(Get-CimInstance -ClassName Win32_Service -Filter "Name = 'ClusSvc'" -ErrorAction Stop).Count -gt 0 } catch { }
+        try { $null = Get-Item -LiteralPath (Join-Path $env:SystemRoot 'Cluster\CLUSDB') -Force -ErrorAction Stop } catch [System.Management.Automation.ItemNotFoundException] { $hasClusDb = $false } catch { }
+    }
+    $inCluster = if ($nodes.Count -gt 0) { 'Yes' } elseif ($hasClusSvc -and $hasClusDb) { 'Unknown' } else { 'No' }
     if ($nodes -notcontains $env:COMPUTERNAME) { $nodes = @($env:COMPUTERNAME) + $nodes }
     $results = @(foreach ($node in $nodes) {
         try {
@@ -863,8 +900,17 @@ Run this on one machine. It changes nothing. It checks this machine and every ot
         }
     })
     $notChecked = @($results | Where-Object { $_.Status -eq 'Not checked from here' } | ForEach-Object { $_.Machine })
-    if (@($results | Where-Object { $_.Status -eq 'Not clean' }).Count -gt 0) { Write-Output "NOT_ALL_MACHINES_CLEAN" }
-    elseif ($clusterExists -and $notChecked.Count -eq 0) { Write-Output "ALL_MACHINES_CLEAN" }
+    $unknownLine = "Only this machine was checked, because the script could not tell whether it is in a cluster: $clusterNote"
+    if (@($results | Where-Object { $_.Status -eq 'Not clean' }).Count -gt 0) {
+        Write-Output "NOT_ALL_MACHINES_CLEAN"
+        if ($inCluster -eq 'Unknown') { $unknownLine }
+    }
+    elseif ($inCluster -eq 'Unknown') {
+        Write-Output "CLUSTER_STATE_UNKNOWN"
+        $unknownLine
+        Write-Output "Run this on another machine of the cluster."
+    }
+    elseif ($inCluster -eq 'Yes' -and $notChecked.Count -eq 0) { Write-Output "ALL_MACHINES_CLEAN" }
     else {
         Write-Output "THIS_MACHINE_CLEAN"
         if ($notChecked.Count -gt 0) {
@@ -883,13 +929,14 @@ Run this on one machine. It changes nothing. It checks this machine and every ot
 | `ALL_MACHINES_CLEAN` | No machine has an external copy, and every machine has the inbox module at `C:\Program Files\WindowsPowerShell\Modules\AzStackHci.EnvironmentChecker\AzStackHci.EnvironmentChecker.psd1`. A `VersionFolders` entry is a folder you deliberately left in place under [Step 7](#step-7-delete-leftover-folders) until the next planned restart; it does not load. | Go to [Retry the failed operation](#retry-the-failed-operation). |
 | `THIS_MACHINE_CLEAN` | This machine is clean, and no other machine that the script reached has a problem. Either the cluster does not exist yet, or some machines could not be reached; the next line says which. | Run this on each machine that was not checked. When every machine prints `ALL_MACHINES_CLEAN` or `THIS_MACHINE_CLEAN`, go to [Retry the failed operation](#retry-the-failed-operation). |
 | `OTHER_MACHINES_NOT_CHECKED:` followed by machine names | Printed after `THIS_MACHINE_CLEAN`. PowerShell remoting from this machine to the named machines failed, for example with `Access is denied`, so they were not checked. This does not mean that they have a problem. | Run this on each named machine. |
-| `NOT_ALL_MACHINES_CLEAN` | This machine, or another machine that the script reached, still has an external copy or is missing the inbox module. A machine you did not work on can still have a copy that deployment or an update left there. | Run Steps 1 to 7 on each machine whose `Status` is `Not clean`. |
+| `NOT_ALL_MACHINES_CLEAN` | This machine, or another machine that the script reached, still has an external copy or is missing the inbox module. A machine you did not work on can still have a copy that deployment or an update left there. If the next line says that only this machine was checked, the script could not tell whether this machine is in a cluster. | Run Steps 1 to 7 on each machine whose `Status` is `Not clean`. |
+| `CLUSTER_STATE_UNKNOWN` | This machine is clean, but `Get-ClusterNode` failed or returned no machines, and the script could not confirm that the Cluster service is not installed or that the machine has no cluster database. It could not tell whether this machine is in a cluster, so it checked only this machine. The line after it shows the reason. | Run this on another machine of the cluster. If every machine prints this, run this on each machine, and when none prints `NOT_ALL_MACHINES_CLEAN`, go to [Retry the failed operation](#retry-the-failed-operation). |
 
 Do not use the system health check to confirm this fix. It can keep showing a previous result, and it runs the cleanup only on the machine where it runs.
 
 ## Retry the failed operation
 
-Run this script on one machine, after [Verify the fix](#verify-the-fix) printed `ALL_MACHINES_CLEAN`, or printed `THIS_MACHINE_CLEAN` on every machine. It first checks this machine and every other machine that it can reach, the same way as Verify the fix, and it retries nothing if one of them is not clean. A machine that it cannot reach does not stop the retry, so run Verify the fix on each such machine first. It then resumes a solution update whose installation failed with the error in this article. For any other operation, it prints how to retry it. Paste or run the whole block at once. To retry a solution update by hand instead, select **Try again** on the failed update in the Azure portal, or run `Get-SolutionUpdate | Where-Object Version -eq "<version>" | Start-SolutionUpdate`, replacing `<version>` with the version of the update that failed. This works whether the update failed in the readiness check (`HealthCheckFailed`) or during installation. If you ran the readiness check with `Start-SolutionUpdate -PrepareOnly`, retry in PowerShell, not in the Azure portal.
+Run this script on one machine, after [Verify the fix](#verify-the-fix) printed `ALL_MACHINES_CLEAN`, or printed `THIS_MACHINE_CLEAN` on every machine. It first checks this machine and every other machine that it can reach, the same way as Verify the fix, and it retries nothing if one of them is not clean or if it cannot tell whether this machine is in a cluster. A machine that it cannot reach does not stop the retry, so run Verify the fix on each such machine first. It then resumes a solution update whose installation failed with the error in this article. For any other operation, it prints how to retry it. Paste or run the whole block at once. To retry a solution update by hand instead, select **Try again** on the failed update in the Azure portal, or run `Get-SolutionUpdate | Where-Object Version -eq "<version>" | Start-SolutionUpdate`, replacing `<version>` with the version of the update that failed. This works whether the update failed in the readiness check (`HealthCheckFailed`) or during installation. If you ran the readiness check with `Start-SolutionUpdate -PrepareOnly`, retry in PowerShell, not in the Azure portal.
 
 **Changes:** resumes the update only when this machine and every machine that the script can reach are clean, no update is downloading, preparing, installing, or running health checks, and exactly one update is in the `InstallationFailed` state with the error from [Symptoms](#symptoms) in a failed step of its last run. The update continues from the step that failed. In every other case the script changes nothing.
 
@@ -911,9 +958,16 @@ Run this script on one machine, after [Verify the fix](#verify-the-fix) printed 
             InboxModule    = @($found | Where-Object { $_.Path -notlike "*$($_.Version)*" }).Count
         }
     }
-    $clusterExists = $true
-    $nodes = @($env:COMPUTERNAME)
-    try { $nodes = @((Get-ClusterNode -ErrorAction Stop).Name) } catch { $clusterExists = $false }
+    $clusterNote = 'Get-ClusterNode returned no machines.'
+    $nodes = @()
+    try { $nodes = @(Get-ClusterNode -ErrorAction Stop | ForEach-Object { "$($_.Name)" }) } catch { $clusterNote = $_.Exception.Message }
+    $hasClusSvc = $true
+    $hasClusDb = $true
+    if ($nodes.Count -eq 0) {
+        try { $hasClusSvc = @(Get-CimInstance -ClassName Win32_Service -Filter "Name = 'ClusSvc'" -ErrorAction Stop).Count -gt 0 } catch { }
+        try { $null = Get-Item -LiteralPath (Join-Path $env:SystemRoot 'Cluster\CLUSDB') -Force -ErrorAction Stop } catch [System.Management.Automation.ItemNotFoundException] { $hasClusDb = $false } catch { }
+    }
+    $inCluster = if ($nodes.Count -gt 0) { 'Yes' } elseif ($hasClusSvc -and $hasClusDb) { 'Unknown' } else { 'No' }
     if ($nodes -notcontains $env:COMPUTERNAME) { $nodes = @($env:COMPUTERNAME) + $nodes }
     $notChecked = @()
     $notClean = @(foreach ($node in $nodes) {
@@ -934,7 +988,11 @@ Run this script on one machine, after [Verify the fix](#verify-the-fix) printed 
         Write-Output "RETRY_BLOCKED"
         $notCheckedLines
         $notClean | ForEach-Object { "Nothing was retried. $_" }
-    } elseif (-not $clusterExists) {
+    } elseif ($inCluster -eq 'Unknown') {
+        Write-Output "CLUSTER_STATE_UNKNOWN"
+        Write-Output "Nothing was retried. Could not tell whether this machine is in a cluster, so the script could not tell whether the failed operation is an update or a deployment: $clusterNote"
+        Write-Output "Run this script on another machine of the cluster."
+    } elseif ($inCluster -eq 'No') {
         Write-Output "CLUSTER_NOT_DEPLOYED"
         Write-Output "The cluster does not exist yet, so only this machine was checked. Run Verify the fix on every machine. When every machine is clean, resume the deployment: open your Azure Local instance, go to Deployments, and select Resume deployment."
     } else {
@@ -1046,7 +1104,8 @@ Run this script on one machine, after [Verify the fix](#verify-the-fix) printed 
 | `UPDATE_FAILED_FOR_OTHER_REASON` | No failed step in the failed update's last run shows the error from [Symptoms](#symptoms), or its error could not be read, so the script did not resume it. | Check the error under **Updates**. If it is the error from [Symptoms](#symptoms), select **Try again**. Otherwise, see [Troubleshoot solution updates for Azure Local](https://learn.microsoft.com/azure/azure-local/update/update-troubleshooting-23h2). |
 | `WINDOWS_POWERSHELL_REQUIRED` | The script ran in PowerShell 7 and did nothing. | Run it in Windows PowerShell 5.1. |
 | `NO_UPDATE_TO_RESUME` | No solution update failed during installation, so nothing was resumed. For each update in another failed state, for example `HealthCheckFailed` after its readiness check failed, the script prints the command that retries it. | Retry the operation that failed the same way you started it. For a solution update, run the command the script printed: `Get-SolutionUpdate \| Where-Object Version -eq "<version>" \| Start-SolutionUpdate`. This works whether the update failed in the readiness check or during installation. If you ran only its readiness check with `Start-SolutionUpdate -PrepareOnly`, add `-PrepareOnly` to run only the check again, and do not continue in the Azure portal. If you started the update in the Azure portal, you can instead select **Try again** there. |
-| `CLUSTER_NOT_DEPLOYED` | The cluster does not exist yet, so the failed operation is a deployment. Only this machine was checked. | Confirm with [Verify the fix](#verify-the-fix) that every machine prints `THIS_MACHINE_CLEAN`, then resume the deployment as described in [Resume deployment](https://learn.microsoft.com/azure/azure-local/deploy/deploy-via-portal#resume-deployment). |
+| `CLUSTER_NOT_DEPLOYED` | The Cluster service is not installed or this machine has no cluster database, so the cluster does not exist yet and the failed operation is a deployment. Only this machine was checked. | Confirm with [Verify the fix](#verify-the-fix) that every machine prints `THIS_MACHINE_CLEAN`, then resume the deployment as described in [Resume deployment](https://learn.microsoft.com/azure/azure-local/deploy/deploy-via-portal#resume-deployment). |
+| `CLUSTER_STATE_UNKNOWN` | `Get-ClusterNode` failed or returned no machines, and the script could not confirm that the Cluster service is not installed or that the machine has no cluster database, so it could not tell whether the failed operation is an update or a deployment. Nothing was retried. The line after it shows the reason. | Run this script on another machine of the cluster. If every machine prints this, retry the failed update by hand as described at the start of this section, or resume a failed deployment as described in [Resume deployment](https://learn.microsoft.com/azure/azure-local/deploy/deploy-via-portal#resume-deployment). |
 | `UPDATE_SERVICE_NOT_AVAILABLE` | The cluster exists, but the solution update service did not answer. This can happen when a deployment failed after the cluster was created. | For a deployment, see [Resume deployment](https://learn.microsoft.com/azure/azure-local/deploy/deploy-via-portal#resume-deployment). On a deployed system, see [Troubleshoot solution updates for Azure Local](https://learn.microsoft.com/azure/azure-local/update/update-troubleshooting-23h2). |
 | `UPDATE_CHECK_BUSY` | Another machine was reading or starting the update at the same moment, for example because this script runs on several machines at once, and the update service was still busy after three tries within about a minute. Nothing was retried on this machine. | Run this script again in a minute. |
 | `SOLUTION_UPDATE_NOT_RESUMED` | The update did not start again. The script prints the reason. | Retry the update the same way you started it. If it still does not start, [contact Microsoft support](#when-to-contact-microsoft-support). |
