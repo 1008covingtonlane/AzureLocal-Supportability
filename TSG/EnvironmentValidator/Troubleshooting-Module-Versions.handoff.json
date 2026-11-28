@@ -8,7 +8,7 @@
     ]
   },
   "source": {
-    "sha256": "d8aa7f77e9abb87b20f2d8d846996053a18f5777359b20b65207634293dc9f99",
+    "sha256": "d9bf83dcbeb6c7ed22883fc696a8f6d6719eb27da5187c5ca6bbdde8ccefc85f",
     "path": "TSG/EnvironmentValidator/Troubleshooting-Module-Versions.md"
   },
   "handoffs": [
@@ -18,10 +18,10 @@
       "binding": {
         "step": "S3",
         "section": "Mitigation Details > Step 3: Close the other programs that hold the files",
-        "line": 635,
+        "line": 665,
         "class": "operator-required",
         "needs": [],
-        "source_sha256": "deb5643fe589d363fabe396e1f8f4682f488f16292577d488853ac862aefb348",
+        "source_sha256": "039b9cf96924a6ad6fd7cb763a65217bcf7230c43d39c589e8ad059544051b98",
         "marker": "Stop here and confirm."
       },
       "reason": "A person must decide whether it is safe to end another program or sign its user out.",
@@ -31,7 +31,7 @@
       "run_on": "off-node",
       "families": [],
       "instructions": {
-        "text": "The owner of each program that Step 1 listed, other than the PowerShell windows that Step 2 stops, confirms that it can be closed and closes it, or lets you close it. Then run Step 4, which prints `FILES_RELEASED` when no program holds the files."
+        "text": "The owner of each program that Step 1 listed, other than the PowerShell windows that Step 2 stops and the processes whose `NextStep` says to leave them running, confirms that it can be closed and closes it, or lets you close it. Then run Step 4. This step is done when Step 4 prints `FILES_RELEASED`, or when it prints `FILES_IN_USE` and running Step 1 again shows that only processes whose `NextStep` says to leave them running still hold the files."
       },
       "parameters": [],
       "verify": {
@@ -52,7 +52,7 @@
             ],
             "source": {
               "section": "Mitigation Details > Step 4: Confirm that the files are released",
-              "line": 644,
+              "line": 674,
               "kind": "code",
               "sha256": "656dc01a8055b39e811abcd49435564756b76e9d51e056dc413af3a688e8f4e1"
             }
