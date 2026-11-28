@@ -56,16 +56,17 @@ Use this guide on Azure Local 2311.2 or later when you see any of these problems
 - Don't run the module in a remote PowerShell session, such as `Enter-PSSession` or `Invoke-Command`. The test uses PowerShell remoting from the machine you're signed in to, to reach every machine in the instance that is Up. In a remote session, that machine usually can't pass your sign-in on to the other machines, so the test can't reach them and doesn't run.
 - PowerShell remoting (WinRM) must work from that machine to every machine in the instance that is Up. `Get-ClusterNode` shows the state of each machine.
 - Access to the PowerShell Gallery, directly or through your proxy. You need it to install the module, and each time the module loads it checks the gallery for a newer version.
+- Paste or run each block whole, not line by line. Text that arrives as keystrokes, for example from a right-click paste in the console window or a paste over SSH, can run one statement at a time, so a check that fails doesn't stop the statements after it. Each block that has more than one statement is wrapped in `. { ... }` so that it runs as one unit, and the values it saves stay in the window for the next step.
 
 ## Installation
 
 **Changes:** installs the Support.AksArc module from the PowerShell Gallery and loads it into the current PowerShell session. It doesn't change Azure Local, MOC, or your workloads.
 
 ```powershell
-Install-Module -Name Support.AksArc
-
-Import-Module Support.AksArc
-
+. {
+    Install-Module -Name Support.AksArc
+    Import-Module Support.AksArc
+}
 ```
 
 `Install-Module` asks you to confirm installing from the PSGallery repository, which isn't trusted by default, and to accept the module license. Answer Yes to both. When the module loads, it shows a disclaimer that starts with `THE SOFTWARE IS PROVIDED "AS IS"` and then prints `Checking if you are on the latest version`. It can also show a warning that some commands from the module `Common` use unapproved verbs. These are expected.
@@ -75,9 +76,11 @@ If the module was already installed, update it before you use it, so that you ru
 **Changes:** replaces the installed Support.AksArc module with the newest version from the PowerShell Gallery and reloads it.
 
 ```powershell
-Remove-Module -Name Support.AksArc -ErrorAction SilentlyContinue
-Update-Module -Name Support.AksArc
-Import-Module -Name Support.AksArc
+. {
+    Remove-Module -Name Support.AksArc -ErrorAction SilentlyContinue
+    Update-Module -Name Support.AksArc
+    Import-Module -Name Support.AksArc
+}
 ```
 
 ## Commands 
@@ -115,7 +118,7 @@ The output ends with a summary line, followed by a table that lists each test wi
 
 ### Test for issues with remediation
 
-Run this only when the test above reported a `Failed` or `Error` test, or the `Critical Test` error. First check whether the module's fix would remove VMs, and then run the block that fixes the failed tests. The block never removes VMs. On a three-machine instance with one failed test, it took about 75 seconds; the time depends on the fixes it applies.
+Run this only when the test above reported a `Failed` or `Error` test, or the `Critical Test` error. Don't run it while a solution update is in progress. First check that no solution update is in progress, then check whether the module's fix would remove VMs, and then run the block that fixes the failed tests. The block never removes VMs. On a three-machine instance with one failed test, it took about 75 seconds; the time depends on the fixes it applies.
 
 **Changes:** depending on the failing test, the fix can:
 
@@ -133,20 +136,36 @@ It doesn't restart the Failover Cluster service or the Hyper-V Virtual Machine M
 > [!WARNING]
 > **[HIGH RISK]** The module doesn't undo its fixes, and there is no rollback. An MOC update, renewed MOC identities and certificates, and deleted MOC working folders stay as they are. If you aren't sure the failed tests are the problem you're troubleshooting, contact Microsoft Support before you run the block.
 
-First, check whether the module's fix would remove VMs. This check runs only that test and changes nothing:
+First, check that no solution update is in progress. A solution update also updates MOC, and while that runs, the module's test `Validate MOC Powershell Not Stuck in Updating` reports MOC as stuck. Its fix deletes MOC working folders and marks the MOC update as failed, and the fix for `Validate MOC is on Latest Patch Version` starts an MOC update of its own. This check reads the state of each solution update and changes nothing:
 
 ```powershell
-$vmTest = @(Test-SupportAksArcKnownIssues -TestId MOC-0017)
-if ($vmTest.Count -eq 0) { 'TEST-DID-NOT-RUN' }
-elseif (@($vmTest | Where-Object { $_.Status -in 'Failed', 'Error' }).Count -gt 0) { 'VM-REMOVAL-PENDING'; $vmTest | Format-List TestName, Status, Message }
-else { 'NO-VM-REMOVAL' }
+try {
+    $running = @(Get-SolutionUpdate -ErrorAction Stop | Where-Object { [string]$_.State -in 'Downloading', 'Preparing', 'HealthChecking', 'Installing' })
+    if ($running.Count -gt 0) { 'UPDATE-IN-PROGRESS'; $running | Format-List DisplayName, Version, State }
+    else { 'NO-UPDATE-IN-PROGRESS' }
+} catch { "UPDATE-CHECK-ERROR: $($_.Exception.Message)" }
+```
+
+- `NO-UPDATE-IN-PROGRESS`: no solution update is running. Continue with the next check.
+- `UPDATE-IN-PROGRESS`: the lines after it name the update and its state. Don't run anything else in this section. Wait until the update finishes or fails, and then run the test in [Test for known issues](#test-for-known-issues) again: a result from while the update ran, such as `Validate MOC Powershell Not Stuck in Updating` failing, can be wrong.
+- `UPDATE-CHECK-ERROR`: the state of the solution updates couldn't be read. Don't run anything else in this section. Run this check again in a few minutes. If it keeps failing, contact Microsoft Support.
+
+Then check whether the module's fix would remove VMs. This check runs only that test and changes nothing:
+
+```powershell
+. {
+    $vmTest = @(Test-SupportAksArcKnownIssues -TestId MOC-0017)
+    if ($vmTest.Count -eq 0) { 'TEST-DID-NOT-RUN' }
+    elseif (@($vmTest | Where-Object { $_.Status -in 'Failed', 'Error' }).Count -gt 0) { 'VM-REMOVAL-PENDING'; $vmTest | Format-List TestName, Status, Message }
+    else { 'NO-VM-REMOVAL' }
+}
 ```
 
 - `NO-VM-REMOVAL`: the fix would remove no VMs. Run the block below.
 - `VM-REMOVAL-PENDING`: the module's fix would stop and remove the VMs that the message lists, and any other VM whose name contains one of those names. Run the block below, which fixes every other failed test and never removes VMs, and follow [If the fix would remove VMs](#if-the-fix-would-remove-vms) for the VM removal.
 - `TEST-DID-NOT-RUN`: the test ran no checks. Use the results table above to find out why.
 
-Run this block whatever the check printed. It fixes every failed test except `Validate Virtual Machine Stuck In Deleting Due To OS Disk Lock`, which removes VMs and is left to [If the fix would remove VMs](#if-the-fix-would-remove-vms). It runs the test and reads each test's ID from its `Running test: <test name> with ID: <ID>` line. Then it runs the remediation for each test that failed, had an error, or stopped the run as a critical test, except `MOC-0017`. A critical test that fails stops the test run, so the tests after it don't run. After the block fixes that test, it runs the test again, for at most 4 passes. While it runs, it prints:
+Run this block after the solution update check printed `NO-UPDATE-IN-PROGRESS`, whatever the VM removal check printed. It fixes every failed test except `Validate Virtual Machine Stuck In Deleting Due To OS Disk Lock`, which removes VMs and is left to [If the fix would remove VMs](#if-the-fix-would-remove-vms). It runs the test and reads each test's ID from its `Running test: <test name> with ID: <ID>` line. Then it runs the remediation for each test that failed, had an error, or stopped the run as a critical test, except `MOC-0017`. A critical test that fails stops the test run, so the tests after it don't run. After the block fixes that test, it runs the test again, for at most 4 passes. While it runs, it prints:
 
 - `REMEDIATION-PASS <n>` at the start of each pass;
 - `CRITICAL-STOP <ID>` if a critical test stopped that pass;
@@ -167,70 +186,76 @@ Its last line is one of these results:
 
 **Changes:** applies the fixes listed above for the failed tests only, one test at a time. It never runs the fix that removes VMs, but it can still update MOC and restart MOC agents.
 
+**Paste or run the whole block at once, not line by line.** It runs as one unit, so if the window isn't Windows PowerShell 5.1, the block stops before it fixes anything.
+
 ```powershell
-if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Run this command in Windows PowerShell 5.1 (powershell.exe), not PowerShell 7.' }
-$final = $null; $lastStop = $null; $pass = 0
-try {
-    while (-not $final) {
-        if ($pass -ge 4) { $final = "REMEDIATION-PASS-LIMIT $lastStop"; break }
-        $pass++
-        "REMEDIATION-PASS $pass"
-        $info = $null
-        $results = @(Test-SupportAksArcKnownIssues -InformationVariable info)
-        $ids = @($info | ForEach-Object { [regex]::Match([string]$_.MessageData, '^Running test: .+ with ID: ((MOC|FC|VMMS)-\d{4})$') } | Where-Object { $_.Success } | ForEach-Object { $_.Groups[1].Value })
-        if ($ids.Count -eq 0) { $final = 'TEST-DID-NOT-RUN'; break }
-        $stop = $null
-        if ($results.Count -lt $ids.Count) { $stop = $ids[$ids.Count - 1]; "CRITICAL-STOP $stop" }
-        if ($stop -eq 'FC-0011') { $final = 'CRITICAL-STOP-NO-AUTOFIX FC-0011'; break }
-        if ($stop -and $stop -eq $lastStop) { $final = "CRITICAL-STOP-REPEATED $stop"; break }
-        $failed = @(for ($i = 0; $i -lt $ids.Count; $i++) { if ($i -ge $results.Count -or $results[$i].Status -in 'Failed', 'Error') { $ids[$i] } })
-        if ($failed.Count -eq 0) { 'NO-FAILED-TESTS' }
-        foreach ($id in $failed) {
-            if ($id -eq 'MOC-0017') { 'SKIPPED MOC-0017'; continue }
-            "REMEDIATE $id"
-            Invoke-SupportAksArcRemediation -TestId $id
+. {
+    if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Run this command in Windows PowerShell 5.1 (powershell.exe), not PowerShell 7.' }
+    $final = $null; $lastStop = $null; $pass = 0
+    try {
+        while (-not $final) {
+            if ($pass -ge 4) { $final = "REMEDIATION-PASS-LIMIT $lastStop"; break }
+            $pass++
+            "REMEDIATION-PASS $pass"
+            $info = $null
+            $results = @(Test-SupportAksArcKnownIssues -InformationVariable info)
+            $ids = @($info | ForEach-Object { [regex]::Match([string]$_.MessageData, '^Running test: .+ with ID: ((MOC|FC|VMMS)-\d{4})$') } | Where-Object { $_.Success } | ForEach-Object { $_.Groups[1].Value })
+            if ($ids.Count -eq 0) { $final = 'TEST-DID-NOT-RUN'; break }
+            $stop = $null
+            if ($results.Count -lt $ids.Count) { $stop = $ids[$ids.Count - 1]; "CRITICAL-STOP $stop" }
+            if ($stop -eq 'FC-0011') { $final = 'CRITICAL-STOP-NO-AUTOFIX FC-0011'; break }
+            if ($stop -and $stop -eq $lastStop) { $final = "CRITICAL-STOP-REPEATED $stop"; break }
+            $failed = @(for ($i = 0; $i -lt $ids.Count; $i++) { if ($i -ge $results.Count -or $results[$i].Status -in 'Failed', 'Error') { $ids[$i] } })
+            if ($failed.Count -eq 0) { 'NO-FAILED-TESTS' }
+            foreach ($id in $failed) {
+                if ($id -eq 'MOC-0017') { 'SKIPPED MOC-0017'; continue }
+                "REMEDIATE $id"
+                Invoke-SupportAksArcRemediation -TestId $id
+            }
+            if ($stop) { $lastStop = $stop } else { $final = "REMEDIATION-PASSES-DONE Passes=$pass" }
         }
-        if ($stop) { $lastStop = $stop } else { $final = "REMEDIATION-PASSES-DONE Passes=$pass" }
-    }
-} catch { $final = "REMEDIATION-ERROR: $($_.Exception.Message)" }
-$final
+    } catch { $final = "REMEDIATION-ERROR: $($_.Exception.Message)" }
+    $final
+}
 ```
 
 #### If the fix would remove VMs
 
-Run this when the check in [Test for issues with remediation](#test-for-issues-with-remediation) printed `VM-REMOVAL-PENDING`. It runs that test again and lists every cluster role and Hyper-V VM that the fix would stop and remove, matched the same way the fix matches them. It changes nothing. Its last line is `VM-LIST-COMPLETE` only if it checked every machine that is `Up`. Keep this PowerShell window open; the steps after it use the list it keeps.
+Run this when the VM removal check in [Test for issues with remediation](#test-for-issues-with-remediation) printed `VM-REMOVAL-PENDING`. It runs that test again and lists every cluster role and Hyper-V VM that the fix would stop and remove, matched the same way the fix matches them. It changes nothing. Its last line is `VM-LIST-COMPLETE` only if it checked every machine that is `Up`. Keep this PowerShell window open; the steps after it use the list it keeps.
 
 ```powershell
-$getVmRemovalList = {
-    $lines = @(); $complete = $true
-    try {
-        $vmTest = @(Test-SupportAksArcKnownIssues -TestId MOC-0017)
-        $pending = @($vmTest | Where-Object { $_.Status -in 'Failed', 'Error' })
-        $names = @($pending | ForEach-Object { $_.AffectedVMs } | ForEach-Object { $_.VMName })
-        if ($vmTest.Count -eq 0) { $complete = $false; $lines += 'VM-LIST-ERROR: the test ran no checks.' }
-        elseif ($pending.Count -gt 0 -and $names.Count -eq 0) { $complete = $false; $lines += 'VM-LIST-ERROR: the test result lists no VM names.' }
-        foreach ($name in $names) {
-            $groups = @(Get-ClusterGroup -ErrorAction Stop | Where-Object { $_.Name.Contains($name) })
-            if ($groups.Count -gt 0) { $lines += @($groups | ForEach-Object { "MOC VM $name -> cluster role $($_.Name)" }) }
-            else {
-                $found = 0; $notChecked = 0
-                foreach ($node in @(Get-ClusterNode -ErrorAction Stop | Where-Object { $_.State -eq 'Up' } | ForEach-Object { $_.Name })) {
-                    try {
-                        $vms = @(Get-VM -ComputerName $node -ErrorAction Stop | Where-Object { $_.Name -like "*$name*" })
-                        $found += $vms.Count
-                        $lines += @($vms | ForEach-Object { "MOC VM $name -> Hyper-V VM $($_.Name) on $node" })
-                    } catch { $notChecked++; $complete = $false; $lines += "VM-LIST-ERROR: MOC VM $name -> NOT CHECKED on ${node}: $($_.Exception.Message)" }
+. {
+    $getVmRemovalList = {
+        $lines = @(); $complete = $true
+        try {
+            $vmTest = @(Test-SupportAksArcKnownIssues -TestId MOC-0017)
+            $pending = @($vmTest | Where-Object { $_.Status -in 'Failed', 'Error' })
+            $names = @($pending | ForEach-Object { $_.AffectedVMs } | ForEach-Object { $_.VMName })
+            if ($vmTest.Count -eq 0) { $complete = $false; $lines += 'VM-LIST-ERROR: the test ran no checks.' }
+            elseif ($pending.Count -gt 0 -and $names.Count -eq 0) { $complete = $false; $lines += 'VM-LIST-ERROR: the test result lists no VM names.' }
+            foreach ($name in $names) {
+                $groups = @(Get-ClusterGroup -ErrorAction Stop | Where-Object { $_.Name.Contains($name) })
+                if ($groups.Count -gt 0) { $lines += @($groups | ForEach-Object { "MOC VM $name -> cluster role $($_.Name)" }) }
+                else {
+                    $found = 0; $notChecked = 0
+                    foreach ($node in @(Get-ClusterNode -ErrorAction Stop | Where-Object { $_.State -eq 'Up' } | ForEach-Object { $_.Name })) {
+                        try {
+                            $vms = @(Get-VM -ComputerName $node -ErrorAction Stop | Where-Object { $_.Name -like "*$name*" })
+                            $found += $vms.Count
+                            $lines += @($vms | ForEach-Object { "MOC VM $name -> Hyper-V VM $($_.Name) on $node" })
+                        } catch { $notChecked++; $complete = $false; $lines += "VM-LIST-ERROR: MOC VM $name -> NOT CHECKED on ${node}: $($_.Exception.Message)" }
+                    }
+                    if ($found -eq 0 -and $notChecked -eq 0) { $lines += "MOC VM $name -> no matching cluster role or Hyper-V VM found" }
                 }
-                if ($found -eq 0 -and $notChecked -eq 0) { $lines += "MOC VM $name -> no matching cluster role or Hyper-V VM found" }
             }
-        }
-    } catch { $complete = $false; $lines += "VM-LIST-ERROR: $($_.Exception.Message)" }
-    [pscustomobject]@{ Complete = $complete; Lines = @($lines | Sort-Object -Unique) }
+        } catch { $complete = $false; $lines += "VM-LIST-ERROR: $($_.Exception.Message)" }
+        [pscustomobject]@{ Complete = $complete; Lines = @($lines | Sort-Object -Unique) }
+    }
+    $shownVmList = & $getVmRemovalList
+    $shownVmList.Lines
+    if ($shownVmList.Complete -and $shownVmList.Lines.Count -eq 0) { 'NO-VM-REMOVAL-PENDING' }
+    if ($shownVmList.Complete) { 'VM-LIST-COMPLETE' } else { 'VM-LIST-INCOMPLETE' }
 }
-$shownVmList = & $getVmRemovalList
-$shownVmList.Lines
-if ($shownVmList.Complete -and $shownVmList.Lines.Count -eq 0) { 'NO-VM-REMOVAL-PENDING' }
-if ($shownVmList.Complete) { 'VM-LIST-COMPLETE' } else { 'VM-LIST-INCOMPLETE' }
 ```
 
 - If it prints `NO-VM-REMOVAL-PENDING` and then `VM-LIST-COMPLETE`, the fix would now remove no VMs, and there is nothing for the owner to confirm. Continue with [Run the fix after the owner approves](#run-the-fix-after-the-owner-approves), which saves the empty list and checks it again just before the command.
@@ -245,35 +270,39 @@ if ($shownVmList.Complete) { 'VM-LIST-COMPLETE' } else { 'VM-LIST-INCOMPLETE' }
 The command matches VMs by name when it runs, so a VM created, renamed, or moved after the owner approved the list can be removed too. Save the approved list now, in the same window as the list. It saves exactly the list the owner reviewed, and changes nothing:
 
 ```powershell
-$approvedVmList = $null; $vmListUnchanged = $false
-if ($null -eq $shownVmList -or $null -eq $getVmRemovalList) { 'VM-LIST-NOT-SAVED: there is no list in this window.' }
-elseif (-not $shownVmList.Complete) { 'VM-LIST-NOT-SAVED: the list is incomplete.' }
-else {
-    $approvedVmList = @($shownVmList.Lines)
-    $approvedVmList
-    if ($approvedVmList.Count -eq 0) { 'NO-VM-REMOVAL-PENDING' }
-    'VM-LIST-SAVED'
+. {
+    $approvedVmList = $null; $vmListUnchanged = $false
+    if ($null -eq $shownVmList -or $null -eq $getVmRemovalList) { 'VM-LIST-NOT-SAVED: there is no list in this window.' }
+    elseif (-not $shownVmList.Complete) { 'VM-LIST-NOT-SAVED: the list is incomplete.' }
+    else {
+        $approvedVmList = @($shownVmList.Lines)
+        $approvedVmList
+        if ($approvedVmList.Count -eq 0) { 'NO-VM-REMOVAL-PENDING' }
+        'VM-LIST-SAVED'
+    }
 }
 ```
 
 - `VM-LIST-SAVED`: the lines above it are the saved list, one line per VM the command would remove. They're the list the owner approved. With `NO-VM-REMOVAL-PENDING`, the command would remove no VMs.
 - `VM-LIST-NOT-SAVED`: this window has no complete list. Don't run the command. Run the check in [If the fix would remove VMs](#if-the-fix-would-remove-vms) again in this window, and get the owner's confirmation for the list it prints.
 
-**Plan for:** between the owner's approval and the command below, don't create, rename, or migrate VMs on the instance, and don't let anyone else do so. Any of these can change which VMs the command matches.
+**Plan for:** between the owner's approval and the command below, don't create, rename, or migrate VMs on the instance, don't start a solution update, and don't let anyone else do so. Any of these can change which VMs the command matches or what its fixes do.
 
-Immediately before you run the command, run this check in the same window. It compares the VMs the command would remove now with the saved list, and changes nothing:
+Immediately before you run the command, run the solution update check in [Test for issues with remediation](#test-for-issues-with-remediation) again. Continue only if it prints `NO-UPDATE-IN-PROGRESS`. Then run this check in the same window. It compares the VMs the command would remove now with the saved list, and changes nothing:
 
 ```powershell
-$vmListUnchanged = $false
-try {
-    if ($null -eq $getVmRemovalList -or $null -eq $approvedVmList) { throw 'no saved list in this window. Run the block that saves the list first.' }
-    $now = & $getVmRemovalList
-    $added = @($now.Lines | Where-Object { $approvedVmList -notcontains $_ })
-    $gone = @($approvedVmList | Where-Object { $now.Lines -notcontains $_ })
-    if (-not $now.Complete) { 'VM-LIST-RECHECK-ERROR'; $now.Lines | Where-Object { $_ -like 'VM-LIST-ERROR:*' } }
-    elseif ($added.Count -gt 0 -or $gone.Count -gt 0) { 'VM-LIST-CHANGED'; $added | ForEach-Object { "NEW: $_" }; $gone | ForEach-Object { "GONE: $_" } }
-    else { $vmListUnchanged = $true; 'VM-LIST-UNCHANGED' }
-} catch { "VM-LIST-RECHECK-ERROR: $($_.Exception.Message)" }
+. {
+    $vmListUnchanged = $false
+    try {
+        if ($null -eq $getVmRemovalList -or $null -eq $approvedVmList) { throw 'no saved list in this window. Run the block that saves the list first.' }
+        $now = & $getVmRemovalList
+        $added = @($now.Lines | Where-Object { $approvedVmList -notcontains $_ })
+        $gone = @($approvedVmList | Where-Object { $now.Lines -notcontains $_ })
+        if (-not $now.Complete) { 'VM-LIST-RECHECK-ERROR'; $now.Lines | Where-Object { $_ -like 'VM-LIST-ERROR:*' } }
+        elseif ($added.Count -gt 0 -or $gone.Count -gt 0) { 'VM-LIST-CHANGED'; $added | ForEach-Object { "NEW: $_" }; $gone | ForEach-Object { "GONE: $_" } }
+        else { $vmListUnchanged = $true; 'VM-LIST-UNCHANGED' }
+    } catch { "VM-LIST-RECHECK-ERROR: $($_.Exception.Message)" }
+}
 ```
 
 - `VM-LIST-UNCHANGED`: the command would remove exactly the approved VMs. Run the command below now, in the same window.
@@ -282,14 +311,17 @@ try {
 
 If you don't get a new approval, don't run the command. The block in [Test for issues with remediation](#test-for-issues-with-remediation) fixes the other failed tests without removing VMs.
 
-The command runs only right after this check printed `VM-LIST-UNCHANGED` in the same window; otherwise it stops with an error and changes nothing:
+The command runs only right after this check printed `VM-LIST-UNCHANGED` in the same window; otherwise it stops with an error and changes nothing.
+
+**Paste or run the whole block at once, not line by line.** It runs as one unit, so a failed check stops it before the command runs:
 
 ```powershell
-if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Run this command in Windows PowerShell 5.1 (powershell.exe), not PowerShell 7.' }
-$listChecked = $vmListUnchanged; $vmListUnchanged = $false
-if (-not $listChecked) { throw 'Run the check above first, in this window. Run this command only right after it prints VM-LIST-UNCHANGED.' }
-Invoke-SupportAksArcRemediation
-
+. {
+    if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Run this command in Windows PowerShell 5.1 (powershell.exe), not PowerShell 7.' }
+    $listChecked = $vmListUnchanged; $vmListUnchanged = $false
+    if (-not $listChecked) { throw 'Run the check above first, in this window. Run this command only right after it prints VM-LIST-UNCHANGED.' }
+    Invoke-SupportAksArcRemediation
+}
 ```
 
 It prints the results described in [Test for issues with remediation](#test-for-issues-with-remediation). Then continue with [If a test has no automatic fix](#if-a-test-has-no-automatic-fix).
@@ -301,15 +333,17 @@ The tests `Failover Cluster service not responsive or not running` (`FC-0011`) a
 After any remediation, run this check. It runs only those two tests and changes nothing:
 
 ```powershell
-if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Run this command in Windows PowerShell 5.1 (powershell.exe), not PowerShell 7.' }
-$fcErrors = $null; $vmmsErrors = $null
-$fcRows = @(Test-SupportAksArcKnownIssues -TestId FC-0011 -ErrorVariable fcErrors)
-$vmmsRows = @(Test-SupportAksArcKnownIssues -TestId VMMS-0012 -ErrorVariable vmmsErrors)
-$critical = @(@($fcErrors) + @($vmmsErrors) | Where-Object { "$_" -match '^Critical Test ' })
-$failed = @(@($fcRows) + @($vmmsRows) | Where-Object { $_.Status -in 'Failed', 'Error' })
-if ($critical.Count -gt 0 -or $failed.Count -gt 0) { 'MANUAL-RESTART-NEEDED'; $critical | ForEach-Object { "$_" }; $failed | Format-List TestName, Status, Message }
-elseif ($fcRows.Count -eq 0 -or $vmmsRows.Count -eq 0) { 'TEST-DID-NOT-RUN' }
-else { 'NO-MANUAL-RESTART' }
+. {
+    if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Run this command in Windows PowerShell 5.1 (powershell.exe), not PowerShell 7.' }
+    $fcErrors = $null; $vmmsErrors = $null
+    $fcRows = @(Test-SupportAksArcKnownIssues -TestId FC-0011 -ErrorVariable fcErrors)
+    $vmmsRows = @(Test-SupportAksArcKnownIssues -TestId VMMS-0012 -ErrorVariable vmmsErrors)
+    $critical = @(@($fcErrors) + @($vmmsErrors) | Where-Object { "$_" -match '^Critical Test ' })
+    $failed = @(@($fcRows) + @($vmmsRows) | Where-Object { $_.Status -in 'Failed', 'Error' })
+    if ($critical.Count -gt 0 -or $failed.Count -gt 0) { 'MANUAL-RESTART-NEEDED'; $critical | ForEach-Object { "$_" }; $failed | Format-List TestName, Status, Message }
+    elseif ($fcRows.Count -eq 0 -or $vmmsRows.Count -eq 0) { 'TEST-DID-NOT-RUN' }
+    else { 'NO-MANUAL-RESTART' }
+}
 ```
 
 - `NO-MANUAL-RESTART`: continue with [Verify the fix](#verify-the-fix).
@@ -414,13 +448,15 @@ else { 'NO-MANUAL-RESTART' }
 Run the test again, and list any test that failed:
 
 ```powershell
-$results = @(Test-SupportAksArcKnownIssues)
-$failed = @($results | Where-Object { $_.Status -in 'Failed', 'Error' })
-$failed | Format-List TestName, Status, Message
-"Tests run: $($results.Count). Failed or error: $($failed.Count)."
+. {
+    $results = @(Test-SupportAksArcKnownIssues)
+    $failed = @($results | Where-Object { $_.Status -in 'Failed', 'Error' })
+    $failed | Format-List TestName, Status, Message
+    "Tests run: $($results.Count). Failed or error: $($failed.Count)."
+}
 ```
 
-The fix worked when no test is listed, no error is shown, and the last line shows `Failed or error: 0` with a test count above 0, for example `Tests run: 23. Failed or error: 0.` `Tests run: 0` means an error stopped the run. A `Warning` test isn't listed; handle it as described in the results table. If any test is listed, or an error remains, go back to [Test for issues with remediation](#test-for-issues-with-remediation) once, starting with the check for VM removal. If a test is still listed after that, see [Support](#support).
+The fix worked when no test is listed, no error is shown, and the last line shows `Failed or error: 0` with a test count above 0, for example `Tests run: 23. Failed or error: 0.` `Tests run: 0` means an error stopped the run. A `Warning` test isn't listed; handle it as described in the results table. If any test is listed, or an error remains, go back to [Test for issues with remediation](#test-for-issues-with-remediation) once, starting with the check for a solution update. If a test is still listed after that, see [Support](#support).
 
 
 ## Support
@@ -431,10 +467,12 @@ When you contact Microsoft Support, include the Support.AksArc module version, y
 **Changes:** writes a transcript file to your Desktop. It doesn't change Azure Local.
 
 ```powershell
-Start-Transcript -Path "$env:USERPROFILE\Desktop\Support-AksArc-$(Get-Date -Format yyyyMMdd-HHmmss).txt"
-Import-Module -Name Support.AksArc
-Get-Module -Name Support.AksArc | Select-Object Name, Version | Out-Host
-Get-SolutionUpdateEnvironment | Select-Object CurrentVersion | Out-Host
-Test-SupportAksArcKnownIssues | Format-List TestName, Status, Message | Out-Host
-Stop-Transcript
+. {
+    Start-Transcript -Path "$env:USERPROFILE\Desktop\Support-AksArc-$(Get-Date -Format yyyyMMdd-HHmmss).txt"
+    Import-Module -Name Support.AksArc
+    Get-Module -Name Support.AksArc | Select-Object Name, Version | Out-Host
+    Get-SolutionUpdateEnvironment | Select-Object CurrentVersion | Out-Host
+    Test-SupportAksArcKnownIssues | Format-List TestName, Status, Message | Out-Host
+    Stop-Transcript
+}
 ```
